@@ -10,6 +10,7 @@ from growth.growth_manager import (
     GrowthManager,
     GrowthContext,
 )
+from growth.evidence_engine import build_evidence_findings
 
 from typing import Any
 
@@ -203,10 +204,13 @@ class InstagramAnalyzeResponse(BaseModel):
     posting_plan: InstagramPostingPlan | None = None
     growth_plan: list[InstagramGrowthAction] = []
 
+    # V6 findings retain the observations and sample size behind each claim.
+    evidence_findings: list[dict[str, Any]] = []
+
     # AI Growth Manager
     growth_manager: dict[str, Any] | None = None
 
-    audit_version: int = 4
+    audit_version: int = 6
     source: str
     analyzed_at: str | None = None
     message: str | None = None
@@ -1872,7 +1876,7 @@ async def analyze_instagram_profile(
 
     if (
         fresh_cache is not None
-        and safe_int(fresh_cache.get("audit_version")) >= 3
+        and safe_int(fresh_cache.get("audit_version")) >= 6
     ):
         return InstagramAnalyzeResponse(
             **fresh_cache
@@ -2014,6 +2018,14 @@ async def analyze_instagram_profile(
             media=recent_media,
         )
 
+        evidence_findings = build_evidence_findings(
+            media=recent_media,
+            engagement_rate=analytics.estimated_engagement_rate,
+            consistency_score=analytics.posting_consistency_score,
+            caption_score=analytics.caption_usage_score,
+            posts_per_week=analytics.posts_per_week,
+        )
+
         result = InstagramAnalyzeResponse(
             success=True,
             profile=profile,
@@ -2027,8 +2039,9 @@ async def analyze_instagram_profile(
             content_analysis=content_analysis,
             posting_plan=posting_plan,
             growth_plan=growth_plan,
-            audit_version=3,
-            source="boxapi_public_analysis_v3",
+            evidence_findings=evidence_findings,
+            audit_version=6,
+            source="boxapi_public_analysis_v6",
             analyzed_at=datetime.now(
                 timezone.utc
             ).isoformat(),
@@ -2079,7 +2092,8 @@ async def analyze_instagram_profile(
             content_analysis=None,
             posting_plan=None,
             growth_plan=[],
-            audit_version=3,
+            evidence_findings=[],
+            audit_version=6,
             source="error",
             analyzed_at=None,
             message=str(error),
