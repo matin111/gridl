@@ -88,6 +88,13 @@ class PlannerProfileContext(BaseModel):
         max_length=100,
     )
 
+    # Optional, additive signals supplied by newer Android clients. Older
+    # clients can keep sending the original profile shape unchanged.
+    detected_domain: str = Field(default="", max_length=200)
+    products: list[str] = Field(default_factory=list)
+    content_dna: dict[str, Any] = Field(default_factory=dict)
+    recent_performance: list[dict[str, Any]] = Field(default_factory=list)
+
 
 class PlannerRequest(BaseModel):
     goal: Literal[
@@ -155,6 +162,21 @@ class PlannerDay(BaseModel):
     priority: str
     estimated_minutes: int
     completed: bool = False
+    # A complete, independently publishable content package. These are
+    # additive so the legacy Android mapping above remains wire-compatible.
+    hook: str = ""
+    short_script: str = ""
+    caption: str = ""
+    publish_time: str = ""
+    engagement_task: str = ""
+    kpi: str = ""
+    actions: list[str] = Field(
+        default_factory=lambda: [
+            "copy_full_content",
+            "create_content",
+            "add_to_calendar",
+        ]
+    )
 
 
 class PlannerResponse(BaseModel):
@@ -350,6 +372,12 @@ def planner_json_schema(
                             "minimum": 5,
                             "maximum": 180,
                         },
+                        "hook": {"type": "string"},
+                        "short_script": {"type": "string"},
+                        "caption": {"type": "string"},
+                        "publish_time": {"type": "string"},
+                        "engagement_task": {"type": "string"},
+                        "kpi": {"type": "string"},
                     },
                     "required": [
                         "day",
@@ -368,6 +396,12 @@ def planner_json_schema(
                         "hashtags",
                         "priority",
                         "estimated_minutes",
+                        "hook",
+                        "short_script",
+                        "caption",
+                        "publish_time",
+                        "engagement_task",
+                        "kpi",
                     ],
                     "additionalProperties": False,
                 },
@@ -417,6 +451,18 @@ def build_planner_input(
 
 بهترین نوع محتوا:
 {profile.best_content_type or "نامشخص"}
+
+دامنه تشخیص‌داده‌شده:
+{profile.detected_domain or request.business_field}
+
+محصولات یا خدمات:
+{json.dumps(profile.products, ensure_ascii=False)}
+
+Content DNA (لحن، ستون‌ها و الگوهای موفق):
+{json.dumps(profile.content_dna, ensure_ascii=False)}
+
+عملکرد محتوای اخیر:
+{json.dumps(profile.recent_performance, ensure_ascii=False)}
 """.strip()
 
     return f"""
@@ -446,10 +492,15 @@ def build_planner_input(
 قوانین برنامه:
 - دقیقاً {request.days} روز تولید کن.
 - شماره day از ۱ شروع و پیوسته باشد.
-- هر روز فقط یک اقدام اصلی، روشن و قابل اجرا داشته باشد.
-- روزها تکراری نباشند.
-- برنامه باید از تحقیق و آماده‌سازی شروع شود و به تولید، انتشار، تعامل و تحلیل برسد.
+- هر روز یک محتوای کامل و مستقل باشد که همان روز قابل انتشار است؛ هرگز یک محتوا را بین چند روز تقسیم نکن.
+- topic، hook، short_script، caption و cta هر روز با تمام روزهای دیگر متفاوت باشد.
+- فرمت‌ها را در هفته متنوع کن (ریلز، کاروسل، استوری تعاملی، فروش و اعتمادسازی).
+- هیچ روزی صرفاً «نوشتن هوک»، «بهبود کپشن»، تحقیق، آماده‌سازی یا انتشار محتوای روز دیگر نباشد.
+- حتی روز تحلیل عملکرد باید مرور کوتاه را همراه با بازآفرینی و انتشار کامل قوی‌ترین موضوع ارائه کند.
 - موضوع هر روز مشخص، اختصاصی و قابل استفاده مستقیم باشد.
+- hook شروع آماده محتوا، short_script متن/اسلایدهای آماده اجرا و caption کپشن نهایی انتشار باشد.
+- engagement_task اقدام مشخص بعد از انتشار و kpi یک معیار قابل اندازه‌گیری همان محتوا باشد.
+- از دامنه، محصولات، مخاطب، Content DNA و عملکرد اخیر بالا در تمام برنامه استفاده کن.
 - prompt باید آماده ارسال به ابزار مرتبط باشد.
 - tool فقط یکی از این مقادیر باشد:
   content_studio
@@ -466,7 +517,7 @@ def build_planner_input(
 - اگر فعالیت فقط با دستور متنی قابل ساخت است، از image_generate استفاده کن و در action_title بنویس «ساخت تصویر با هوش مصنوعی».
 - برای ساخت هشتگ از hashtag استفاده کن.
 - برای ارزیابی عملکرد از analyzer استفاده کن.
-- best_time باید زمان مشخص فارسی مانند «۲۰:۳۰» باشد.
+- best_time و publish_time باید برابر و زمان مشخص فارسی مانند «۲۰:۳۰» باشند.
 - هشتگ‌ها با # شروع شوند.
 - CTA کوتاه و طبیعی باشد.
 - estimated_minutes واقع‌بینانه باشد.
@@ -622,6 +673,13 @@ def normalize_planner_days(
         )
 
     normalized: list[PlannerDay] = []
+    unique_values: dict[str, set[str]] = {
+        key: set() for key in ("topic", "hook", "caption", "cta")
+    }
+    incomplete_actions = (
+        "write hook", "improve caption", "publish previous", "نوشتن هوک",
+        "بهبود کپشن", "اصلاح کپشن", "فقط هوک", "انتشار محتوای",
+    )
 
     for index, raw_day in enumerate(
         raw_days[:days_count],
@@ -658,6 +716,36 @@ def normalize_planner_days(
                     clean_hashtag
                 )
 
+        def clean(key: str, fallback: str = "") -> str:
+            return str(raw_day.get(key, fallback) or "").strip()
+
+        package = {
+            key: clean(key)
+            for key in (
+                "goal", "content_type", "topic", "hook", "short_script",
+                "caption", "cta", "publish_time", "engagement_task", "kpi",
+            )
+        }
+        package["publish_time"] = package["publish_time"] or clean("best_time")
+        missing = [key for key, value in package.items() if not value]
+        if missing:
+            raise RuntimeError(
+                f"روز {index} بسته محتوایی کامل ندارد: {', '.join(missing)}"
+            )
+
+        task_text = " ".join(
+            clean(key).casefold()
+            for key in ("title", "description", "goal", "topic", "action_title")
+        )
+        if any(phrase in task_text for phrase in incomplete_actions):
+            raise RuntimeError(f"روز {index} یک اقدام ناقص از محتوای دیگر است.")
+
+        for key in unique_values:
+            comparable = package[key].casefold()
+            if comparable in unique_values[key]:
+                raise RuntimeError(f"مقدار {key} در روز {index} تکراری است.")
+            unique_values[key].add(comparable)
+
         normalized.append(
             PlannerDay(
                 day=index,
@@ -679,30 +767,10 @@ def normalize_planner_days(
                         "",
                     )
                 ).strip(),
-                goal=str(
-                    raw_day.get(
-                        "goal",
-                        "",
-                    )
-                ).strip(),
-                content_type=str(
-                    raw_day.get(
-                        "content_type",
-                        "",
-                    )
-                ).strip(),
-                topic=str(
-                    raw_day.get(
-                        "topic",
-                        "",
-                    )
-                ).strip(),
-                best_time=str(
-                    raw_day.get(
-                        "best_time",
-                        "",
-                    )
-                ).strip(),
+                goal=package["goal"],
+                content_type=package["content_type"],
+                topic=package["topic"],
+                best_time=package["publish_time"],
                 tool=str(
                     raw_day.get(
                         "tool",
@@ -727,12 +795,7 @@ def normalize_planner_days(
                         "",
                     )
                 ).strip(),
-                cta=str(
-                    raw_day.get(
-                        "cta",
-                        "",
-                    )
-                ).strip(),
+                cta=package["cta"],
                 hashtags=clean_hashtags,
                 priority=str(
                     raw_day.get(
@@ -747,6 +810,12 @@ def normalize_planner_days(
                     )
                 ),
                 completed=False,
+                hook=package["hook"],
+                short_script=package["short_script"],
+                caption=package["caption"],
+                publish_time=package["publish_time"],
+                engagement_task=package["engagement_task"],
+                kpi=package["kpi"],
             )
         )
 
