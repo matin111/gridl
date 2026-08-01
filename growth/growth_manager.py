@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from growth.growth_models import (
     GrowthManagerResponse,
     Recommendation,
@@ -12,6 +13,12 @@ from growth.growth_models import (
     ContentDiagnosis,
     WeeklyRoadmapItem,
     GrowthForecast,
+)
+from growth.domain_intelligence import (
+    DOMAIN_PROFILES,
+    DomainDetector,
+    content_dna,
+    similarity,
 )
 
 
@@ -29,12 +36,23 @@ class GrowthContext:
     best_content_type: str
     bio: str
     is_verified: bool = False
+    recent_media: list[object] | None = None
 
 
 class GrowthManager:
 
     def __init__(self, ctx: GrowthContext):
         self.ctx = ctx
+        self.media = ctx.recent_media or []
+        captions = [str(getattr(item, "caption", "") or "") for item in self.media]
+        hashtags = [tag for caption in captions for tag in caption.split() if tag.startswith("#")]
+        links = [part for part in ctx.bio.split() if part.startswith(("http://", "https://"))]
+        self.domain = DomainDetector().detect(
+            biography=ctx.bio, username=ctx.username, display_name=ctx.full_name,
+            captions=captions, hashtags=hashtags, external_links=links,
+        )
+        self.domain_profile = DOMAIN_PROFILES[self.domain.domain]
+        self.dna = content_dna(self.media, ctx.best_time)
 
     def build(self) -> GrowthManagerResponse:
         score = self._growth_score()
@@ -74,7 +92,8 @@ class GrowthManager:
         consistency = "healthy" if self.ctx.posting_consistency >= 65 else "needs_improvement"
         captions = "healthy" if self.ctx.caption_score >= 80 else "needs_improvement"
         return ContentDiagnosis(
-            summary="تشخیص بر اساس تعامل عمومی، نظم انتشار و پوشش کپشن محتوای اخیر است.",
+            summary=(f"حوزه {self.domain.domain} (زیرحوزه {self.domain.subdomain}) با اطمینان "
+                     f"{self.domain.confidence:.0%} تشخیص داده شد؛ خوشه برتر {self.dna['topic']} است."),
             strongest_format=self.ctx.best_content_type or "نامشخص",
             engagement_status=engagement,
             consistency_status=consistency,
@@ -290,20 +309,46 @@ class GrowthManager:
         )
 
     def _ready_to_publish(self):
-
+        profile = self.domain_profile
+        domain = self.domain.domain
+        subject = profile.evergreen_topics[0]
+        hooks = {
+            "VPN": "چرا اینترنتت کند نیست؛ مسیرت اشتباه است.",
+            "Restaurant": "این غذا را فقط آخر هفته می‌توانی سفارش بدهی.",
+            "Clothing": "این اشتباه ساده، کل استایلت را نامتعادل نشان می‌دهد.",
+            "AI": "این پرامپت، کاری را که یک ساعت طول می‌کشید در چند دقیقه انجام می‌دهد.",
+            "Marketing": "اگر محتوا داری اما مشتری نه، این بخش قیف را جا انداخته‌ای.",
+        }
+        hook = hooks.get(domain, f"قبل از انتخاب {subject}، این نکته تخصصی را بدان.")
+        entities = self.domain.entities
+        product = (entities["products"] or list(profile.products) or [subject])[0]
+        caption = (
+            f"{hook}\n\nبرای {profile.audience[0]}، انتخاب درست «{product}» فقط به قیمت وابسته نیست. "
+            f"{profile.problems[0]} را بررسی کن و بعد سراغ {profile.terminology[0]} برو. "
+            f"این راه کوتاه، تصمیمی دقیق‌تر برای {subject} می‌سازد.\n\n{profile.cta}"
+        )
+        previous = [str(getattr(item, "caption", "") or "") for item in self.media]
+        # Deterministic regeneration: use a different knowledge facet until the
+        # proposed caption has less than 30% vocabulary overlap with every post.
+        if any(similarity(caption, old) >= .30 for old in previous if old):
+            caption = (f"راهنمای امروز: {profile.questions[0]}\n\nسه معیار را جداگانه بسنج: "
+                       f"{profile.terminology[0]}، {profile.problems[-1]} و {profile.objections[0]}. "
+                       f"نتیجه را با نیاز {profile.audience[0]} تطبیق بده.\n\n{profile.cta}")
+        tags = list(dict.fromkeys(profile.hashtags))
+        # 60% domain, 20% topic and 20% current-context tags.  "Trend" here is
+        # constrained to the page's own terminology, never an unrelated trend.
+        domain_tags = (tags * 2)[:6]
+        topic_tags = ["#" + re.sub(r"\s+", "_", x) for x in profile.evergreen_topics[:2]]
+        trend_tags = ["#" + re.sub(r"\s+", "", x) for x in profile.terminology[:2]]
+        hashtags = list(dict.fromkeys(domain_tags + topic_tags + trend_tags))
         return ReadyToPublish(
-            hook="قبل از اینکه محتوای بعدی را منتشر کنی این نکته را ببین...",
-            caption="یک کپشن آموزشی کوتاه با CTA مشخص بنویس.",
-            cta="اگر این نکته مفید بود ذخیره کن.",
-            hashtags=[
-                "#رشد_اینستاگرام",
-                "#تولید_محتوا",
-                "#هوش_مصنوعی",
-                "#رشدیار",
-            ],
-            publish_time=self.ctx.best_time,
+            hook=hook,
+            caption=caption,
+            cta=profile.cta,
+            hashtags=hashtags,
+            publish_time=self.dna["publishing_hour"] or self.ctx.best_time,
             image_prompt=(
-                "Instagram modern cover, clean, premium, purple branding, "
-                "high contrast, social media post"
+                f"Premium Instagram cover for {domain}, {subject}, clean layout, "
+                f"visual details inspired by {profile.terminology[0]}, high contrast"
             ),
         )

@@ -2087,6 +2087,7 @@ async def analyze_instagram_profile(
                 best_content_type=analytics.best_content_type or "محتوا",
                 bio=profile.biography,
                 is_verified=profile.is_verified,
+                recent_media=recent_media,
             )
         ).build()
 
@@ -2105,8 +2106,8 @@ async def analyze_instagram_profile(
             growth_plan=growth_plan,
             evidence_findings=evidence_findings,
             growth_manager=growth_manager.model_dump(mode="json"),
-            audit_version=6,
-            source="boxapi_public_analysis_v6",
+            audit_version=7,
+            source="boxapi_public_analysis_v7",
             analyzed_at=datetime.now(
                 timezone.utc
             ).isoformat(),
