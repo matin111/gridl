@@ -1,0 +1,375 @@
+from __future__ import annotations
+
+import os
+import shutil
+from urllib.parse import quote
+
+from fastapi import APIRouter, Request, UploadFile, File
+from fastapi.responses import HTMLResponse, RedirectResponse
+
+from .common import *
+
+
+router = APIRouter(prefix="/admin")
+
+
+APK_DIR = "/root/aistudio-api/site-assets/apk"
+APK_URL_BASE = "https://ap.movifilm.sbs/site-assets/apk"
+
+
+def settings_css():
+
+    return """
+<style>
+
+.settings-page{
+display:grid;
+gap:20px;
+}
+
+.settings-card{
+background:white;
+border:1px solid #e8e3f8;
+border-radius:24px;
+padding:25px;
+}
+
+.title{
+font-size:24px;
+font-weight:900;
+margin-bottom:10px;
+}
+
+.desc{
+color:#777;
+margin-bottom:25px;
+}
+
+.field{
+display:grid;
+gap:8px;
+margin-top:20px;
+}
+
+.field label{
+font-weight:800;
+}
+
+input[type=text],
+input[type=file]{
+
+padding:14px;
+border-radius:14px;
+border:1px solid #ddd;
+direction:ltr;
+
+}
+
+
+button{
+
+background:#6c3cff;
+color:white;
+border:0;
+padding:14px 35px;
+border-radius:15px;
+font-weight:900;
+
+}
+
+.file-box{
+
+background:#f7f5ff;
+padding:15px;
+border-radius:15px;
+direction:ltr;
+
+}
+
+</style>
+"""
+
+
+
+@router.get("/settings",response_class=HTMLResponse)
+async def settings_page(request:Request):
+
+    redirect=require_auth(request)
+
+    if redirect:
+        return redirect
+
+
+    with database() as db:
+
+        rows=db.execute(
+            """
+            SELECT key,value
+            FROM app_settings
+            WHERE key IN
+            ('apk_url','market_url','google_play_url')
+            """
+        ).fetchall()
+
+
+    settings={
+        r["key"]:r["value"]
+        for r in rows
+    }
+
+
+    body=f"""
+
+{settings_css()}
+
+
+<div class="settings-page">
+
+
+<div class="settings-card">
+
+
+<div class="title">
+دانلود اپلیکیشن رشدیار
+</div>
+
+
+<div class="desc">
+آپلود فایل APK و مدیریت لینک‌های انتشار
+</div>
+
+
+
+<form 
+method="post"
+action="/admin/settings/upload-apk"
+enctype="multipart/form-data">
+
+
+<div class="field">
+
+<label>
+انتخاب فایل APK
+</label>
+
+
+<input 
+type="file"
+name="apk_file"
+accept=".apk"
+required>
+
+</div>
+
+
+<br>
+
+
+<button>
+آپلود APK
+</button>
+
+
+</form>
+
+
+
+<div class="field">
+
+<label>
+لینک فعلی APK
+</label>
+
+
+<div class="file-box">
+
+{esc(settings.get("apk_url","هنوز آپلود نشده"))}
+
+</div>
+
+</div>
+
+
+
+
+<form method="post"
+action="/admin/settings/save">
+
+
+
+<div class="field">
+
+<label>
+لینک بازار
+</label>
+
+<input
+type="text"
+name="market_url"
+value="{esc(settings.get('market_url',''))}">
+
+</div>
+
+
+
+<div class="field">
+
+<label>
+Google Play
+</label>
+
+<input
+type="text"
+name="google_play_url"
+value="{esc(settings.get('google_play_url',''))}">
+
+</div>
+
+
+
+<br>
+
+
+<button>
+ذخیره تنظیمات
+</button>
+
+
+</form>
+
+
+</div>
+
+
+</div>
+
+"""
+
+
+    return HTMLResponse(
+        page_layout(
+            "تنظیمات دانلود",
+            body
+        )
+    )
+
+
+
+
+
+@router.post("/settings/upload-apk")
+
+async def upload_apk(
+    request: Request,
+    apk_file: UploadFile = File(...)
+):
+
+    redirect = require_auth(request)
+
+    if redirect:
+        return redirect
+
+    if not apk_file.filename.lower().endswith(".apk"):
+        return RedirectResponse(
+            "/admin/settings",
+            status_code=303
+        )
+
+    APK_DIR = "site-assets/apk"
+
+    os.makedirs(
+        APK_DIR,
+        exist_ok=True
+    )
+
+    filename = apk_file.filename
+
+    path = os.path.join(
+        APK_DIR,
+        filename
+    )
+
+    with open(path, "wb") as buffer:
+        shutil.copyfileobj(
+            apk_file.file,
+            buffer
+        )
+
+    apk_url = f"/site-assets/apk/{filename}"
+
+    with database() as db:
+        db.execute(
+            '''
+            INSERT INTO settings (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key)
+            DO UPDATE SET value = excluded.value
+            ''',
+            ("apk_url", apk_url),
+        )
+
+    return RedirectResponse(
+        "/admin/settings",
+        status_code=303
+    )
+
+
+async def save_settings(request:Request):
+
+
+    redirect=require_auth(request)
+
+    if redirect:
+        return redirect
+
+
+    form=await read_form(request)
+
+
+    now=isoformat(
+        utc_now()
+    )
+
+
+    values={
+
+    "market_url":
+    form.get("market_url",""),
+
+    "google_play_url":
+    form.get("google_play_url","")
+
+    }
+
+
+
+    with database() as db:
+
+        for k,v in values.items():
+
+            db.execute(
+            """
+            INSERT INTO app_settings
+            (key,value,updated_at)
+
+            VALUES(?,?,?)
+
+            ON CONFLICT(key)
+            DO UPDATE SET
+
+            value=excluded.value,
+            updated_at=excluded.updated_at
+
+            """,
+            (
+            k,
+            v,
+            now
+            )
+            )
+
+
+    return RedirectResponse(
+        "/admin/settings",
+        status_code=303
+    )

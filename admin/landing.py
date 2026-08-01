@@ -1,0 +1,52 @@
+from __future__ import annotations
+from .common import *  # noqa: F401,F403
+from landing import DEFAULT_SETTINGS, ensure_landing_tables
+
+router = APIRouter(prefix="/admin")
+
+@router.get("/landing", response_class=HTMLResponse)
+async def landing_settings_page(request: Request):
+    redirect = require_auth(request)
+    if redirect:
+        return redirect
+    with database() as connection:
+        ensure_landing_tables(connection)
+        rows = connection.execute("SELECT key,value FROM landing_settings").fetchall()
+    values = DEFAULT_SETTINGS.copy()
+    values.update({str(row["key"]): str(row["value"] or "") for row in rows})
+
+    # default values for optional landing fields
+    values.setdefault("enamad_html", "")
+    values.setdefault("footer_text", "")
+    fields = [
+        ("site_title","تیتر اصلی"),("site_subtitle","توضیح قهرمان"),("eyebrow","متن کوچک بالای تیتر"),
+        ("hero_note","جمله تاکید"),("primary_button_text","متن دکمه اصلی"),("secondary_button_text","متن دکمه دوم"),
+        ("download_url","لینک دانلود یا مقصد دکمه"),("story_title","تیتر داستان برند"),("story_text","متن داستان برند"),
+        ("about_title","عنوان درباره ما"),("about_text","متن درباره ما"),("about_mission","ماموریت برند"),
+        ("contact_title","عنوان تماس با ما"),("contact_text","توضیح تماس با ما"),("support_phone","شماره پشتیبانی"),
+        ("support_email","ایمیل پشتیبانی"),("support_telegram","لینک تلگرام"),("announcement","متن بنر بالای سایت"),
+        ("footer_text","متن فوتر"),
+        ("enamad_html","کد اینماد"),
+    ]
+    long_fields = {"site_subtitle","story_text","about_text","about_mission","contact_text","enamad_html"}
+    controls = ""
+    for key, label in fields:
+        control = f'<textarea name="{key}">{esc(values[key])}</textarea>' if key in long_fields else f'<input name="{key}" value="{esc(values[key])}">'
+        controls += f'<div class="{"full" if key in long_fields else ""}"><label>{label}</label>{control}</div>'
+    notice = '<div class="notice" style="background:var(--success-soft)">تغییرات صفحه معرفی ذخیره شد.</div>' if request.query_params.get("saved") == "1" else ""
+    body = f'''{notice}<section class="card"><div class="section-title"><div><h3>متن و هویت صفحه معرفی</h3><div class="section-sub">تیترها، درباره ما، تماس با ما و اطلاعات ارتباطی</div></div><a class="btn btn-secondary" href="/" target="_blank">پیش‌نمایش سایت</a></div><form method="post" action="/admin/landing/save"><div class="form-grid">{controls}<div><label>نمایش بنر</label><select name="show_announcement"><option value="0" {"selected" if values["show_announcement"] != "1" else ""}>غیرفعال</option><option value="1" {"selected" if values["show_announcement"] == "1" else ""}>فعال</option></select></div></div><button class="btn btn-primary" style="margin-top:16px">ذخیره همه تغییرات</button></form></section>'''
+    return HTMLResponse(page_layout("مدیریت صفحه معرفی", body))
+
+@router.post("/landing/save")
+async def save_landing_settings(request: Request):
+    redirect = require_auth(request)
+    if redirect:
+        return redirect
+    form = await read_form(request)
+    now = isoformat(utc_now())
+    with database() as connection:
+        ensure_landing_tables(connection)
+        for key in DEFAULT_SETTINGS:
+            value = (form.get(key) or "").strip()
+            connection.execute("INSERT INTO landing_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", (key,value,now))
+    return RedirectResponse("/admin/landing?saved=1", status_code=303)

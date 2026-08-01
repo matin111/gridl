@@ -1,0 +1,480 @@
+from __future__ import annotations
+
+import hashlib
+import hmac
+import html
+import os
+import secrets
+import sqlite3
+import time
+import urllib.parse
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+
+from subscription_admin_api import (
+    DATABASE_PATH,
+    database,
+    get_or_create_user,
+    isoformat,
+    user_subscription_snapshot,
+    utc_now,
+)
+
+
+SESSION_COOKIE = "aistudio_admin_session"
+SESSION_MAX_AGE_SECONDS = 60 * 60 * 12
+
+
+def panel_password() -> str:
+    return os.getenv(
+        "ADMIN_PANEL_PASSWORD",
+        "",
+    ).strip()
+
+
+def session_secret() -> str:
+    return os.getenv(
+        "ADMIN_PANEL_SESSION_SECRET",
+        "",
+    ).strip()
+
+
+def create_session_token() -> str:
+    timestamp = str(int(time.time()))
+
+    signature = hmac.new(
+        session_secret().encode("utf-8"),
+        timestamp.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    return f"{timestamp}.{signature}"
+
+
+def valid_session_token(
+    token: str | None,
+) -> bool:
+    if not token:
+        return False
+
+    if not session_secret():
+        return False
+
+    try:
+        timestamp_text, signature = token.split(
+            ".",
+            1,
+        )
+
+        timestamp = int(timestamp_text)
+
+    except (ValueError, TypeError):
+        return False
+
+    if (
+        int(time.time()) - timestamp
+        > SESSION_MAX_AGE_SECONDS
+    ):
+        return False
+
+    expected = hmac.new(
+        session_secret().encode("utf-8"),
+        timestamp_text.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    return hmac.compare_digest(
+        signature,
+        expected,
+    )
+
+
+def is_authenticated(
+    request: Request,
+) -> bool:
+    return valid_session_token(
+        request.cookies.get(
+            SESSION_COOKIE
+        )
+    )
+
+
+def require_auth(
+    request: Request,
+):
+    if not is_authenticated(request):
+        return RedirectResponse(
+            url="/admin/login",
+            status_code=303,
+        )
+
+    return None
+
+
+async def read_form(
+    request: Request,
+) -> dict[str, str]:
+    body = await request.body()
+
+    parsed = urllib.parse.parse_qs(
+        body.decode(
+            "utf-8",
+            errors="ignore",
+        )
+    )
+
+    return {
+        key: values[-1]
+        for key, values in parsed.items()
+        if values
+    }
+
+
+def esc(value) -> str:
+    return html.escape(
+        str(value or "")
+    )
+
+
+def active_count() -> int:
+    now = isoformat(utc_now())
+
+    with database() as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM subscriptions
+            WHERE is_active = 1
+              AND (
+                    expires_at IS NULL
+                    OR expires_at > ?
+                  )
+            """,
+            (now,),
+        ).fetchone()
+
+    return int(row["total"])
+
+
+def user_count() -> int:
+    with database() as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM users
+            """
+        ).fetchone()
+
+    return int(row["total"])
+
+
+def campaign_count() -> int:
+    now = isoformat(utc_now())
+
+    with database() as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM campaigns
+            WHERE enabled = 1
+              AND starts_at <= ?
+              AND ends_at > ?
+            """,
+            (
+                now,
+                now,
+            ),
+        ).fetchone()
+
+    return int(row["total"])
+
+
+def notification_count() -> int:
+    with database() as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM notifications
+            """
+        ).fetchone()
+
+    return int(row["total"])
+
+
+
+def dashboard_metrics() -> dict[str, int]:
+    now = utc_now()
+    now_text = isoformat(now)
+    today_text = isoformat(now.replace(hour=0, minute=0, second=0, microsecond=0))
+    online_since = isoformat(now - timedelta(minutes=15))
+
+    with database() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM users) AS total_users,
+                (SELECT COUNT(*) FROM users WHERE last_seen_at >= ?) AS online_users,
+                (SELECT COUNT(*) FROM users WHERE created_at >= ?) AS new_users_today,
+                (SELECT COUNT(*) FROM users WHERE is_blocked = 1) AS blocked_users,
+                (SELECT COUNT(*) FROM subscriptions
+                  WHERE is_active = 1
+                    AND (expires_at IS NULL OR expires_at > ?)) AS premium_users,
+                (SELECT COUNT(*) FROM usage_events WHERE created_at >= ?) AS usage_today,
+                (SELECT COUNT(*) FROM campaigns
+                  WHERE enabled = 1 AND starts_at <= ? AND ends_at > ?) AS active_campaigns,
+                (SELECT COUNT(*) FROM notifications WHERE enabled = 1) AS enabled_notifications
+            """,
+            (online_since, today_text, now_text, today_text, now_text, now_text),
+        ).fetchone()
+
+    total = int(row["total_users"] or 0)
+    premium = int(row["premium_users"] or 0)
+    return {
+        "total_users": total,
+        "online_users": int(row["online_users"] or 0),
+        "new_users_today": int(row["new_users_today"] or 0),
+        "blocked_users": int(row["blocked_users"] or 0),
+        "premium_users": premium,
+        "free_users": max(total - premium, 0),
+        "usage_today": int(row["usage_today"] or 0),
+        "active_campaigns": int(row["active_campaigns"] or 0),
+        "enabled_notifications": int(row["enabled_notifications"] or 0),
+    }
+
+
+def dashboard_daily_series(days: int = 7) -> list[dict[str, int | str]]:
+    today = utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
+    start = today - timedelta(days=days - 1)
+
+    with database() as connection:
+        user_rows = connection.execute(
+            """
+            SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS total
+            FROM users
+            WHERE created_at >= ?
+            GROUP BY substr(created_at, 1, 10)
+            """,
+            (isoformat(start),),
+        ).fetchall()
+        usage_rows = connection.execute(
+            """
+            SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS total
+            FROM usage_events
+            WHERE created_at >= ?
+            GROUP BY substr(created_at, 1, 10)
+            """,
+            (isoformat(start),),
+        ).fetchall()
+
+    users_by_day = {row["day"]: int(row["total"] or 0) for row in user_rows}
+    usage_by_day = {row["day"]: int(row["total"] or 0) for row in usage_rows}
+    result = []
+    for offset in range(days):
+        current = start + timedelta(days=offset)
+        key = current.date().isoformat()
+        result.append({
+            "day": key,
+            "label": current.strftime("%m/%d"),
+            "users": users_by_day.get(key, 0),
+            "usage": usage_by_day.get(key, 0),
+        })
+    return result
+
+
+def dashboard_recent_activity(limit: int = 8) -> list[sqlite3.Row]:
+    with database() as connection:
+        return connection.execute(
+            """
+            SELECT ue.feature_key, ue.event_type, ue.created_at,
+                   COALESCE(u.display_name, u.phone, u.email, ue.installation_id) AS user_title
+            FROM usage_events ue
+            LEFT JOIN users u ON u.installation_id = ue.installation_id
+            ORDER BY ue.created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+def page_layout(
+    title: str,
+    body: str,
+) -> str:
+    """Render the shared admin layout without evaluating CSS/JS braces as Python."""
+    template = r'''<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>__ADMIN_TITLE__ | رشد یار</title>
+<style>
+:root{--primary:#6c3cff;--primary-2:#8b5cff;--primary-dark:#4d22d8;--primary-soft:#f0ebff;--bg:#f6f7fb;--card:#fff;--card-2:#fbfbfe;--text:#181824;--muted:#747487;--border:#e7e7f0;--danger:#d92d20;--danger-soft:#fff0ef;--success:#15945f;--success-soft:#e9f8f1;--warning:#c57a00;--warning-soft:#fff6df;--info:#2767d8;--shadow:0 12px 34px rgba(34,24,74,.075);--radius:22px;}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Tahoma,"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.55}a{text-decoration:none;color:inherit}button,input,select,textarea{font:inherit}button{cursor:pointer}.shell{display:grid;grid-template-columns:276px minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:22px 16px;background:linear-gradient(180deg,#171329 0%,#221847 48%,#301a72 100%);color:#fff;overflow:auto;z-index:30}.brand{display:flex;align-items:center;gap:12px;padding:8px 10px 22px;font-size:21px;font-weight:900}.nav{display:grid;gap:6px}.nav a{display:flex;align-items:center;gap:10px;padding:12px 13px;border-radius:13px;color:rgba(255,255,255,.78);font-size:13px;font-weight:800;transition:.18s}.nav a:hover,.nav a.active{color:#fff;background:rgba(255,255,255,.12);transform:translateX(-2px)}.nav a.active{box-shadow:inset -3px 0 #a88fff}.sidebar-footer{margin-top:24px;padding:14px;border:1px solid rgba(255,255,255,.12);border-radius:16px;background:rgba(255,255,255,.06);font-size:11px;color:rgba(255,255,255,.68)}.content{min-width:0;padding:18px 24px 36px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.page-heading h1{margin:0;font-size:26px;letter-spacing:-.5px}.page-heading p{margin:4px 0 0;color:var(--muted);font-size:12px}.actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.theme-btn,.icon-btn{width:42px;height:42px;display:grid;place-items:center;border:1px solid var(--border);border-radius:13px;background:var(--card);color:var(--text);box-shadow:0 6px 18px rgba(34,24,74,.04)}.grid,.dashboard-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:15px}.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow)}.stat{font-size:30px;font-weight:950;color:var(--primary);margin-top:8px}.metric-card{position:relative;overflow:hidden;min-height:126px;transition:.2s}.metric-card:hover{transform:translateY(-3px);box-shadow:0 18px 42px rgba(34,24,74,.1)}.metric-card::after{content:"";position:absolute;width:110px;height:110px;left:-42px;bottom:-50px;border-radius:50%;background:linear-gradient(135deg,rgba(108,60,255,.13),rgba(108,60,255,.02))}.metric-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.metric-icon{width:40px;height:40px;border-radius:13px;display:grid;place-items:center;background:var(--primary-soft);font-size:18px}.metric-label{color:var(--muted);font-size:12px;font-weight:800}.metric-value{font-size:29px;font-weight:950;margin-top:8px;letter-spacing:-1px}.metric-note{margin-top:4px;color:var(--muted);font-size:11px}.trend{display:inline-flex;align-items:center;gap:4px;padding:3px 7px;border-radius:999px;font-size:10px;font-weight:900}.trend.up{background:var(--success-soft);color:var(--success)}.trend.down{background:var(--danger-soft);color:var(--danger)}.dashboard-main{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(310px,.85fr);gap:13px;margin-top:13px}.section-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}.section-title h3{margin:0;font-size:16px}.section-sub{color:var(--muted);font-size:11px}.chart{display:flex;align-items:flex-end;gap:9px;height:238px;padding:22px 6px 0;border-bottom:1px solid var(--border);background:repeating-linear-gradient(to top,transparent 0,transparent 47px,rgba(120,120,150,.08) 48px)}.chart-column{flex:1;min-width:0;text-align:center;position:relative}.chart-bars{height:185px;display:flex;align-items:flex-end;justify-content:center;gap:5px}.chart-bar{width:14px;min-height:4px;border-radius:8px 8px 3px 3px;transition:.2s}.chart-bar:hover{filter:brightness(1.08);transform:scaleX(1.08)}.chart-bar.users{background:linear-gradient(180deg,#a58aff,#6c3cff)}.chart-bar.usage{background:linear-gradient(180deg,#61dfb4,#18a875)}.chart-label{margin-top:8px;font-size:10px;color:var(--muted)}.chart-tip{display:none;position:absolute;bottom:100%;left:50%;transform:translateX(-50%);z-index:9;white-space:nowrap;padding:7px 9px;border-radius:9px;background:#191727;color:#fff;font-size:9px;box-shadow:0 8px 24px rgba(0,0,0,.2)}.chart-column:hover .chart-tip{display:block}.alert-list{display:grid;gap:8px}.alert-item{display:flex;gap:9px;align-items:flex-start;padding:10px;border:1px solid var(--border);border-radius:13px;background:var(--card-2)}.alert-item.warning{background:var(--warning-soft)}.alert-item.danger{background:var(--danger-soft)}.alert-item.success{background:var(--success-soft)}.alert-copy strong{display:block;font-size:11px}.alert-copy small{display:block;color:var(--muted);font-size:9px;margin-top:2px}.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--muted)}.legend span::before{content:"";display:inline-block;width:9px;height:9px;border-radius:3px;margin-left:5px}.legend .users::before{background:#6c3cff}.legend .usage::before{background:#18a875}.activity-list{display:grid;gap:9px}.activity-item{display:flex;gap:10px;align-items:flex-start;padding:11px;border:1px solid var(--border);border-radius:14px;background:var(--card-2)}.activity-dot{width:9px;height:9px;border-radius:50%;background:var(--primary);margin-top:6px;flex:0 0 auto;box-shadow:0 0 0 4px var(--primary-soft)}.activity-title{font-size:12px;font-weight:800}.activity-meta{color:var(--muted);font-size:10px;margin-top:3px;direction:ltr;text-align:right}.quick-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.quick-link{display:flex;align-items:center;min-height:58px;border:1px solid var(--border);border-radius:15px;padding:13px;background:var(--card-2);font-size:12px;font-weight:850;transition:.18s}.quick-link:hover{transform:translateY(-2px);border-color:#c9bbff;background:var(--primary-soft)}.health-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);font-size:12px}.health-row:last-child{border-bottom:0}.health-status{color:var(--success);font-weight:900;font-size:11px}.progress{height:8px;border-radius:999px;background:#ececf4;overflow:hidden}.progress>span{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--primary),#9b7cff)}.feature-list{display:grid;gap:11px}.feature-row{display:grid;grid-template-columns:minmax(120px,1fr) 2fr auto;gap:12px;align-items:center;font-size:12px}table{width:100%;border-collapse:separate;border-spacing:0;background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden}th,td{padding:12px 13px;border-bottom:1px solid var(--border);text-align:right;vertical-align:middle;font-size:12px}th{background:var(--card-2);color:var(--muted);font-weight:900}tr:last-child td{border-bottom:0}tbody tr:hover{background:rgba(108,60,255,.035)}input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);outline:none}input:focus,select:focus,textarea:focus{border-color:#a68fff;box-shadow:0 0 0 3px rgba(108,60,255,.10)}textarea{min-height:110px;resize:vertical}label{display:block;margin:10px 0 6px;font-weight:800;font-size:12px}.btn{border:0;padding:10px 15px;border-radius:12px;font-weight:850}.btn-primary{color:#fff;background:linear-gradient(135deg,var(--primary),var(--primary-dark))}.btn-danger{color:#fff;background:var(--danger)}.btn-secondary{color:var(--primary);background:var(--primary-soft)}.btn-success{color:#fff;background:#18a875}.btn-small{padding:8px 10px;border-radius:10px;font-size:11px}.badge{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;font-size:10px;font-weight:900}.badge-free{background:#ececf2;color:#55556b}.badge-pro{background:#e9e1ff;color:var(--primary-dark)}.badge-active{background:var(--success-soft);color:var(--success)}.badge-off{background:var(--danger-soft);color:var(--danger)}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.full{grid-column:1/-1}.notice{background:var(--warning-soft);border:1px solid #f0d98e;padding:12px 14px;border-radius:14px;margin-bottom:16px;font-size:12px}.empty-state{padding:36px 16px;text-align:center;color:var(--muted)}.filters{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.filter-link{padding:8px 12px;border-radius:11px;border:1px solid var(--border);background:var(--card);font-size:11px;font-weight:850}.filter-link.active{background:var(--primary);border-color:var(--primary);color:#fff}.kpi-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.kpi{padding:15px;border:1px solid var(--border);border-radius:16px;background:var(--card-2)}.kpi small{color:var(--muted)}.kpi strong{display:block;font-size:24px;margin-top:5px}.split{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-top:15px}.bar-list{display:grid;gap:13px}.bar-item-head{display:flex;justify-content:space-between;gap:10px;margin-bottom:6px;font-size:11px}.login-shell{min-height:100vh;display:grid;place-items:center;padding:20px}.login-card{width:min(420px,100%);background:var(--card);border-radius:24px;padding:26px;border:1px solid var(--border);box-shadow:0 18px 55px rgba(34,24,74,.14)}.users-toolbar{display:grid;grid-template-columns:2fr repeat(3,1fr) auto;gap:10px;align-items:end;margin-bottom:14px}.users-summary{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px}.mini-stat{border:1px solid var(--border);border-radius:16px;padding:14px;background:var(--card);position:relative;overflow:hidden}.mini-stat strong{display:block;font-size:22px;margin-top:5px}.user-list{display:grid;gap:12px}.user-card,.user-card-v3{display:grid;grid-template-columns:minmax(250px,1.25fr) minmax(220px,1fr) minmax(190px,.9fr) auto;gap:18px;align-items:center;padding:18px;border:1px solid var(--border);border-radius:20px;background:var(--card);transition:.2s}.user-card:hover,.user-card-v3:hover{transform:translateY(-2px);box-shadow:var(--shadow);border-color:#c9bbff}.user-profile{display:flex;align-items:center;gap:12px;min-width:0}.avatar,.avatar-v3{width:52px;height:52px;border-radius:16px;display:grid;place-items:center;background:linear-gradient(135deg,#8d6bff,#5630df);color:#fff;font-size:20px;font-weight:900;flex:0 0 auto}.user-main{min-width:0}.user-name{font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.user-sub,.user-meta{color:var(--muted);font-size:11px;margin-top:4px}.user-actions{display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end}.pagination{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:18px;flex-wrap:wrap}.page-link{padding:8px 12px;border-radius:10px;border:1px solid var(--border);background:var(--card)}.page-link.active{background:var(--primary);color:#fff;border-color:var(--primary)}.detail-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}.detail-card,.usage-item{padding:15px;border:1px solid var(--border);border-radius:16px;background:var(--card-2)}.usage-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.drawer-backdrop{position:fixed;inset:0;background:rgba(15,16,32,.46);z-index:1000;opacity:0;pointer-events:none;transition:.2s}.user-drawer{position:fixed;top:0;left:0;width:min(520px,94vw);height:100vh;background:var(--card);z-index:1001;transform:translateX(-105%);transition:.25s;overflow:auto}.drawer-open .drawer-backdrop{opacity:1;pointer-events:auto}.drawer-open .user-drawer{transform:translateX(0)}body.dark{--bg:#0e0f1b;--card:#181927;--card-2:#1d1e2e;--text:#f4f3fb;--muted:#a7a6b8;--border:#303145;--primary-soft:#2b2450;--success-soft:#16382a;--danger-soft:#3b2024;--warning-soft:#3a301b;--shadow:0 14px 36px rgba(0,0,0,.20)}body.dark .sidebar{background:linear-gradient(180deg,#11111d,#201640)}body.dark .progress{background:#2c2d40}@media(max-width:1180px){.grid,.dashboard-grid{grid-template-columns:repeat(2,1fr)}.quick-grid{grid-template-columns:repeat(2,1fr)}.users-summary{grid-template-columns:repeat(3,1fr)}.user-card,.user-card-v3{grid-template-columns:1fr 1fr}}@media(max-width:960px){.shell{grid-template-columns:1fr}.sidebar{position:relative;height:auto;padding:14px}.brand{padding-bottom:10px}.nav{display:flex;overflow:auto;padding-bottom:4px}.nav a{white-space:nowrap}.content{padding:18px}.dashboard-main,.split{grid-template-columns:1fr}}@media(max-width:640px){.content{padding:14px}.topbar{align-items:flex-start}.page-heading h1{font-size:21px}.grid,.dashboard-grid,.kpi-row,.form-grid,.quick-grid,.users-summary,.detail-grid,.usage-grid{grid-template-columns:1fr}.chart{gap:3px}.chart-bar{width:10px}.feature-row{grid-template-columns:1fr}.user-card,.user-card-v3{grid-template-columns:1fr}.users-toolbar{grid-template-columns:1fr}}
+
+/* Admin Panel 3.0: collapsible sidebar */
+:root{--sidebar-width:276px}
+.shell{grid-template-columns:var(--sidebar-width) minmax(0,1fr);transition:grid-template-columns .25s ease}
+body.sidebar-collapsed{--sidebar-width:86px}
+.sidebar{transition:width .25s ease,padding .25s ease}
+.nav-label,.brand-label,.manager-copy,.sidebar-footer{transition:opacity .18s ease,width .18s ease}
+.nav-icon{width:26px;min-width:26px;text-align:center;font-size:16px}
+.sidebar-toggle{width:40px;height:40px;border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);display:grid;place-items:center;font-weight:900}
+.page-title-wrap{display:flex;align-items:center;gap:12px}
+body.sidebar-collapsed .nav-label,body.sidebar-collapsed .brand-label,body.sidebar-collapsed .manager-copy,body.sidebar-collapsed .sidebar-footer{display:none}
+body.sidebar-collapsed .brand,body.sidebar-collapsed .nav a,body.sidebar-collapsed .manager-card{justify-content:center}
+body.sidebar-collapsed .nav a{padding-inline:10px}
+@media(max-width:960px){.sidebar{position:fixed!important;right:0;top:0;width:276px;height:100vh!important;transform:translateX(110%);transition:transform .25s ease;z-index:1001}.shell{grid-template-columns:1fr!important}body.mobile-sidebar-open .sidebar{transform:translateX(0)}.mobile-overlay{display:block!important}}
+.mobile-overlay{display:none;position:fixed;inset:0;background:rgba(12,9,28,.55);z-index:1000;opacity:0;pointer-events:none;transition:.2s}body.mobile-sidebar-open .mobile-overlay{opacity:1;pointer-events:auto}
+
+/* Admin Panel 3.1 fixes: sidebar and users */
+.brand{white-space:nowrap;overflow:hidden}
+.brand-mark{width:42px;height:42px;min-width:42px;display:grid;place-items:center;border-radius:14px;background:linear-gradient(135deg,#9b7cff,#6c3cff);box-shadow:0 10px 24px rgba(108,60,255,.35);font-weight:950}
+.manager-card{overflow:hidden;white-space:nowrap}
+body.sidebar-collapsed{--sidebar-width:76px}
+body.sidebar-collapsed .sidebar{padding-inline:10px}
+body.sidebar-collapsed .brand{padding-inline:7px}
+body.sidebar-collapsed .brand-mark{width:42px;min-width:42px}
+body.sidebar-collapsed .nav a{width:52px;height:48px;margin-inline:auto;padding:0;justify-content:center;transform:none}
+body.sidebar-collapsed .nav a:hover,body.sidebar-collapsed .nav a.active{transform:none}
+body.sidebar-collapsed .nav a.active{box-shadow:inset -3px 0 #a88fff}
+body.sidebar-collapsed .manager-card{width:52px;height:52px;margin-inline:auto!important;padding:0!important;justify-content:center}
+body.sidebar-collapsed .brand-label,body.sidebar-collapsed .nav-label,body.sidebar-collapsed .manager-copy,body.sidebar-collapsed .sidebar-footer{display:none!important}
+.users-hero{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:14px;padding:4px 2px}
+.users-hero h2{margin:0;font-size:24px}
+.users-hero p{margin:5px 0 0;color:var(--muted);font-size:12px}
+.search-wrap{position:relative}
+.search-wrap input{padding-right:40px;padding-left:38px}
+.search-icon{position:absolute;right:13px;bottom:12px;pointer-events:none}
+.clear-search{position:absolute;left:7px;bottom:7px;width:30px;height:30px;border:0;border-radius:9px;background:var(--card-2);color:var(--muted)}
+.users-summary{grid-template-columns:repeat(5,minmax(0,1fr));margin-top:14px}
+.mini-stat{min-height:104px;text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.stat-icon{font-size:18px;margin-bottom:5px}
+.user-card-v3{grid-template-columns:minmax(260px,1.3fr) minmax(250px,1fr) minmax(220px,.9fr) minmax(150px,auto);padding:16px 18px;overflow:visible}
+.avatar-wrap{position:relative;flex:0 0 auto}
+.avatar-ring{padding:3px;border-radius:18px;background:linear-gradient(135deg,#dcd2ff,#7a54f7)}
+.presence-dot{position:absolute;left:-2px;bottom:-2px;width:12px;height:12px;border-radius:50%;border:2px solid var(--card)}
+.presence-dot.online{background:#20bf7b}.presence-dot.offline{background:#a7a7b7}.presence-dot.blocked{background:#ef476f}
+.user-badges{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}
+.info-stack{display:grid;gap:7px;min-width:0}
+.info-row{display:grid;grid-template-columns:78px minmax(0,1fr);gap:8px;align-items:start;font-size:11px}
+.info-row b{color:var(--muted);font-weight:800}
+.info-row span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:auto}
+.usage-strip{display:grid;grid-template-columns:repeat(3,minmax(58px,1fr));gap:7px}
+.usage-chip{padding:9px 7px;text-align:center;border:1px solid var(--border);border-radius:12px;background:var(--card-2)}
+.usage-chip strong{display:block;font-size:18px;line-height:1.2}
+.usage-chip span{display:block;color:var(--muted);font-size:9px;margin-top:3px}
+.user-actions{min-width:140px;justify-content:flex-start;align-items:stretch}
+.user-actions form{margin:0}
+.user-actions .btn{width:100%;white-space:nowrap}
+.more-menu{position:relative}
+.more-menu summary{list-style:none;width:38px;height:36px;display:grid;place-items:center;border:1px solid var(--border);border-radius:10px;background:var(--card-2);cursor:pointer;font-size:20px}
+.more-menu summary::-webkit-details-marker{display:none}
+.more-pop{position:absolute;left:0;top:43px;z-index:50;min-width:155px;padding:7px;border:1px solid var(--border);border-radius:13px;background:var(--card);box-shadow:var(--shadow)}
+.more-pop a,.more-pop button{display:block;width:100%;padding:9px 10px;border:0;border-radius:9px;background:transparent;text-align:right;color:var(--text);font-size:11px}
+.more-pop a:hover,.more-pop button:hover{background:var(--primary-soft)}
+.drawer-head{position:sticky;top:0;display:flex;align-items:center;justify-content:space-between;padding:18px;border-bottom:1px solid var(--border);background:var(--card);z-index:2}
+.drawer-close{width:36px;height:36px;border:0;border-radius:10px;background:var(--card-2);font-size:22px}
+.drawer-body{padding:18px}
+.drawer-profile{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.drawer-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+.drawer-item{padding:12px;border:1px solid var(--border);border-radius:13px;background:var(--card-2)}
+.drawer-item small{display:block;color:var(--muted);margin-bottom:5px}
+.drawer-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.drawer-actions form,.drawer-actions .btn{width:100%;margin:0}
+@media(max-width:1260px){.user-card-v3{grid-template-columns:1fr 1fr}.user-actions{justify-content:flex-start}}
+@media(max-width:960px){body.sidebar-collapsed{--sidebar-width:276px}.sidebar{width:276px!important;padding:14px 16px!important}body.sidebar-collapsed .brand-label,body.sidebar-collapsed .nav-label,body.sidebar-collapsed .manager-copy,body.sidebar-collapsed .sidebar-footer{display:initial!important}body.sidebar-collapsed .nav a{width:auto;height:auto;margin:0;padding:12px 13px;justify-content:flex-start}}
+@media(max-width:700px){.users-hero{align-items:flex-start}.users-summary{grid-template-columns:repeat(2,1fr)}.user-card-v3{grid-template-columns:1fr}.users-toolbar{grid-template-columns:1fr}.drawer-grid,.drawer-actions{grid-template-columns:1fr}}
+
+
+/* Admin Panel 3.3: professional desktop icon rail */
+@media(min-width:961px){
+  .shell{grid-template-columns:276px minmax(0,1fr);transition:grid-template-columns .26s ease}
+  .sidebar{width:276px;min-width:276px;transform:none;opacity:1;pointer-events:auto;overflow-x:hidden;transition:width .26s ease,min-width .26s ease,padding .26s ease}
+  body.sidebar-collapsed .shell{grid-template-columns:88px minmax(0,1fr)}
+  body.sidebar-collapsed .sidebar{width:88px;min-width:88px;padding:18px 12px}
+  body.sidebar-collapsed .brand{padding:6px 0 18px;justify-content:center}
+  body.sidebar-collapsed .brand-mark{width:46px;height:46px;min-width:46px}
+  body.sidebar-collapsed .brand-label,
+  body.sidebar-collapsed .manager-copy,
+  body.sidebar-collapsed .sidebar-footer{display:none!important}
+  body.sidebar-collapsed .manager-card{width:52px;height:52px;margin:0 auto 14px!important;padding:0!important;justify-content:center}
+  body.sidebar-collapsed .nav{gap:8px}
+  body.sidebar-collapsed .nav a{position:relative;width:56px;height:50px;margin:0 auto;padding:0;justify-content:center;border-radius:15px;transform:none}
+  body.sidebar-collapsed .nav a:hover,body.sidebar-collapsed .nav a.active{transform:none}
+  body.sidebar-collapsed .nav a.active{background:linear-gradient(135deg,rgba(150,121,255,.34),rgba(255,255,255,.12));box-shadow:inset -3px 0 #b7a2ff,0 8px 20px rgba(0,0,0,.14)}
+  body.sidebar-collapsed .nav-label{display:none!important}
+  body.sidebar-collapsed .nav-icon{font-size:19px;line-height:1}
+  body.sidebar-collapsed .nav a::after{content:attr(data-label);position:absolute;right:66px;top:50%;transform:translateY(-50%) translateX(8px);white-space:nowrap;padding:8px 10px;border-radius:10px;background:#171329;color:#fff;font-size:11px;font-weight:800;opacity:0;pointer-events:none;transition:.16s;box-shadow:0 10px 28px rgba(0,0,0,.22);z-index:80}
+  body.sidebar-collapsed .nav a:hover::after{opacity:1;transform:translateY(-50%) translateX(0)}
+  body.sidebar-collapsed .content{padding-inline:28px}
+  body.sidebar-collapsed .sidebar-toggle{background:var(--primary);border-color:var(--primary);color:#fff}
+}
+
+
+
+/* Admin Panel 3.4: single-color active navigation */
+.nav a:hover{background:rgba(255,255,255,.08);box-shadow:none}
+.nav a.active,.nav a.active:hover,.nav a.active:focus,.nav a.active:focus-visible{
+  color:#fff!important;
+  background:#5f3bd6!important;
+  box-shadow:none!important;
+  outline:none!important;
+  transform:none!important;
+}
+body.sidebar-collapsed .nav a.active,
+body.sidebar-collapsed .nav a.active:hover,
+body.sidebar-collapsed .nav a.active:focus,
+body.sidebar-collapsed .nav a.active:focus-visible{
+  background:#5f3bd6!important;
+  box-shadow:none!important;
+  outline:none!important;
+}
+.sidebar-toggle:focus,.sidebar-toggle:focus-visible,.nav a:focus,.nav a:focus-visible{outline:none;box-shadow:none}
+</style>
+</head>
+<body>
+<div class="mobile-overlay" onclick="closeSidebar()"></div>
+<div class="shell">
+<aside class="sidebar">
+  <div class="brand"><span class="brand-mark">ر</span><span class="brand-label">مدیریت رشد یار</span></div><div class="manager-card" style="margin:0 8px 14px;padding:11px;border:1px solid rgba(255,255,255,.11);border-radius:14px;background:rgba(255,255,255,.06);display:flex;gap:10px;align-items:center"><span class="nav-icon">م</span><div class="manager-copy"><div style="font-size:11px;font-weight:900">مدیر سیستم</div><div style="font-size:9px;color:#79e7b4;margin-top:3px">● سامانه آنلاین</div></div></div>
+  <nav class="nav">
+    <a data-path="/admin" data-label="داشبورد" href="/admin"><span class="nav-icon">⌂</span><span class="nav-label">داشبورد</span></a>
+    <a data-path="/admin/users" data-label="کاربران و اشتراک‌ها" href="/admin/users"><span class="nav-icon">👥</span><span class="nav-label">کاربران و اشتراک‌ها</span></a>
+    <a data-path="/admin/campaigns" data-label="کمپین‌ها و بنرها" href="/admin/campaigns"><span class="nav-icon">🎯</span><span class="nav-label">کمپین‌ها و بنرها</span></a>
+    <a data-path="/admin/notifications" data-label="اعلان‌ها" href="/admin/notifications"><span class="nav-icon">🔔</span><span class="nav-label">اعلان‌ها</span></a>
+    <a data-path="/admin/support" data-label="پشتیبانی کاربران" href="/admin/support"><span class="nav-icon">💬</span><span class="nav-label">پشتیبانی کاربران</span></a>
+    <a data-path="/admin/analytics" data-label="آمار و گزارش‌ها" href="/admin/analytics"><span class="nav-icon">📊</span><span class="nav-label">آمار و گزارش‌ها</span></a>
+    <a data-path="/admin/features" data-label="مدیریت قابلیت‌ها" href="/admin/features"><span class="nav-icon">🧩</span><span class="nav-label">مدیریت قابلیت‌ها</span></a>
+    <a data-path="/admin/landing" data-label="صفحه معرفی" href="/admin/landing"><span class="nav-icon">🌐</span><span class="nav-label">صفحه معرفی</span></a>
+    <a data-path="/admin/plans" data-label="پلن‌های فروش" href="/admin/plans"><span class="nav-icon">💳</span><span class="nav-label">پلن‌های فروش</span></a>
+    <a data-path="/admin/contact-messages" data-label="پیام‌های سایت" href="/admin/contact-messages"><span class="nav-icon">✉️</span><span class="nav-label">پیام‌های سایت</span></a>
+    <a data-path="/admin/settings" data-label="نسخه و تنظیمات" href="/admin/settings"><span class="nav-icon">⚙️</span><span class="nav-label">نسخه و تنظیمات</span></a>
+    <a data-path="/admin/releases" data-label="مرکز انتشار" href="/admin/releases"><span class="nav-icon">🚀</span><span class="nav-label">مرکز انتشار</span></a>
+    <a data-label="خروج امن" href="/admin/logout"><span class="nav-icon">↪</span><span class="nav-label">خروج امن</span></a>
+  </nav>
+  <div class="sidebar-footer">نسخه پنل ۳.۷<br>مرکز مدیریت کاربران، سهمیه‌ها، محتوا و عملکرد سرویس</div>
+</aside>
+<main class="content">
+  <div class="topbar">
+    <div class="page-title-wrap"><button class="sidebar-toggle" type="button" onclick="toggleSidebar()">☰</button><div class="page-heading"><h1>__ADMIN_TITLE__</h1><p id="todayLabel">مرکز کنترل رشد یار</p></div></div>
+    <div class="actions"><span class="badge badge-active">● API و دیتابیس فعال</span><button class="theme-btn" type="button" onclick="location.reload()" aria-label="بروزرسانی">↻</button><button class="theme-btn" type="button" onclick="toggleTheme()" aria-label="تغییر پوسته">◐</button></div>
+  </div>
+  __ADMIN_BODY__
+</main>
+</div>
+<script>
+(function(){if(localStorage.getItem('admin-theme')==='dark')document.body.classList.add('dark');if(localStorage.getItem('admin-sidebar')==='collapsed'&&innerWidth>960)document.body.classList.add('sidebar-collapsed');const p=location.pathname;document.querySelectorAll('.nav a[data-path]').forEach(a=>{const x=a.dataset.path;a.classList.toggle('active',x==='/admin'?p==='/admin':p.startsWith(x));});try{document.getElementById('todayLabel').textContent=new Intl.DateTimeFormat('fa-IR',{dateStyle:'full'}).format(new Date());}catch(e){}})();
+function toggleTheme(){document.body.classList.toggle('dark');localStorage.setItem('admin-theme',document.body.classList.contains('dark')?'dark':'light')}
+function toggleSidebar(){if(innerWidth<=960){document.body.classList.toggle('mobile-sidebar-open')}else{document.body.classList.toggle('sidebar-collapsed');localStorage.setItem('admin-sidebar',document.body.classList.contains('sidebar-collapsed')?'collapsed':'open')}}
+function closeSidebar(){document.body.classList.remove('mobile-sidebar-open')}
+</script>
+</body></html>'''
+    return (
+        template
+        .replace("__ADMIN_TITLE__", esc(title))
+        .replace("__ADMIN_BODY__", body)
+    )

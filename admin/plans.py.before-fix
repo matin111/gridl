@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+import json
+import re
+from urllib.parse import quote
+
+from .common import *  # noqa: F401,F403
+from landing import ensure_tables
+
+router = APIRouter(prefix="/admin")
+
+
+def clean_features(value: str) -> list[str]:
+    result = []
+    for line in value.replace("\r", "").split("\n"):
+        item = line.strip().lstrip("-•✓").strip()
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+@router.get("/plans", response_class=HTMLResponse)
+async def plans_page(request: Request):
+    redirect = require_auth(request)
+    if redirect:
+        return redirect
+    with database() as connection:
+        ensure_tables(connection)
+        plans = connection.execute("SELECT * FROM subscription_plans ORDER BY display_order,id").fetchall()
+    rows = ""
+    for plan in plans:
+        active = '<span class="badge badge-active">فعال</span>' if int(plan["is_active"] or 0) else '<span class="badge badge-off">غیرفعال</span>'
+        featured = '<span class="badge badge-pro">پیشنهادی</span>' if int(plan["is_featured"] or 0) else "—"
+        rows += f'''<tr><td><strong>{esc(plan['title'])}</strong><br><small>{esc(plan['slug'])}</small></td><td>{int(plan['price'] or 0):,} تومان</td><td>{int(plan['duration_days'] or 0)} روز</td><td>{active}</td><td>{featured}</td><td><form method="post" action="/admin/plans/{int(plan['id'])}/toggle" style="display:inline"><button class="btn btn-small btn-secondary">فعال/غیرفعال</button></form> <form method="post" action="/admin/plans/{int(plan['id'])}/delete" style="display:inline" onsubmit="return confirm('پلن حذف شود؟')"><button class="btn btn-small btn-danger">حذف</button></form></td></tr>'''
+    body = f'''
+    <div class="split">
+      <section class="card"><div class="section-title"><div><h3>ساخت پلن فروش</h3><div class="section-sub">پلن فعال در صفحه اصلی نمایش داده می‌شود.</div></div></div>
+      <form method="post" action="/admin/plans/create"><div class="form-grid">
+        <div><label>نام پلن</label><input name="title" required></div><div><label>شناسه انگلیسی</label><input name="slug" placeholder="pro-monthly" required></div>
+        <div class="full"><label>توضیح کوتاه</label><input name="subtitle"></div><div><label>قیمت فروش</label><input type="number" min="0" name="price" value="0"></div>
+        <div><label>قیمت قبل تخفیف</label><input type="number" min="0" name="compare_price" value="0"></div><div><label>مدت روز</label><input type="number" min="1" name="duration_days" value="30"></div>
+        <div><label>ترتیب نمایش</label><input type="number" name="display_order" value="10"></div><div><label>Badge</label><input name="badge" placeholder="پرفروش‌ترین"></div>
+        <div><label>متن دکمه</label><input name="button_text" value="خرید اشتراک"></div><div class="full"><label>امکانات؛ هر مورد در یک خط</label><textarea name="features"></textarea></div>
+        <div><label><input style="width:auto" type="checkbox" name="is_featured" value="1"> پلن پیشنهادی</label></div><div><label><input style="width:auto" type="checkbox" name="is_active" value="1" checked> فعال</label></div>
+      </div><button class="btn btn-primary" style="margin-top:14px">ساخت پلن</button></form></section>
+      <section class="card"><h3>مرحله فعلی</h3><div class="notice">صفحه معرفی و مدیریت پلن آماده است. اتصال درگاه پرداخت و فعال‌سازی خودکار اشتراک در مرحله بعد انجام می‌شود.</div><a class="btn btn-secondary" href="/#plans" target="_blank">مشاهده سایت</a></section>
+    </div>
+    <section class="card" style="margin-top:15px"><div class="section-title"><div><h3>پلن‌های فعلی</h3><div class="section-sub">{len(plans)} پلن ثبت شده</div></div></div><div style="overflow:auto"><table><thead><tr><th>پلن</th><th>قیمت</th><th>مدت</th><th>وضعیت</th><th>پیشنهادی</th><th>عملیات</th></tr></thead><tbody>{rows or '<tr><td colspan="6" class="empty-state">پلنی ثبت نشده است.</td></tr>'}</tbody></table></div></section>'''
+    return HTMLResponse(page_layout("پلن‌های فروش", body))
+
+
+@router.post("/plans/create")
+async def create_plan(request: Request):
+    redirect = require_auth(request)
+    if redirect:
+        return redirect
+    try:
+        form = await read_form(request)
+        title = (form.get("title") or "").strip()
+        slug = re.sub(r"[^a-z0-9-]+", "-", (form.get("slug") or "").strip().lower()).strip("-")
+        if not title or not slug:
+            raise ValueError("نام و شناسه پلن الزامی است.")
+        now = isoformat(utc_now())
+        with database() as connection:
+            ensure_tables(connection)
+            connection.execute("""INSERT INTO subscription_plans(title,slug,subtitle,price,compare_price,duration_days,badge,features_json,button_text,is_featured,is_active,display_order,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                title, slug, (form.get("subtitle") or "").strip(), int(form.get("price") or 0), int(form.get("compare_price") or 0), max(1,int(form.get("duration_days") or 30)), (form.get("badge") or "").strip(), json.dumps(clean_features(form.get("features") or ""),ensure_ascii=False), (form.get("button_text") or "خرید اشتراک").strip(), 1 if form.get("is_featured")=="1" else 0, 1 if form.get("is_active")=="1" else 0, int(form.get("display_order") or 0), now, now))
+        return RedirectResponse("/admin/plans", status_code=303)
+    except Exception as exc:
+        return RedirectResponse(f"/admin/plans?error={quote(str(exc))}", status_code=303)
+
+
+@router.post("/plans/{plan_id}/toggle")
+async def toggle_plan(request: Request, plan_id: int):
+    redirect = require_auth(request)
+    if redirect:
+        return redirect
+    with database() as connection:
+        ensure_tables(connection)
+        connection.execute("UPDATE subscription_plans SET is_active=CASE WHEN is_active=1 THEN 0 ELSE 1 END,updated_at=? WHERE id=?", (isoformat(utc_now()),plan_id))
+    return RedirectResponse("/admin/plans", status_code=303)
+
+
+@router.post("/plans/{plan_id}/delete")
+async def delete_plan(request: Request, plan_id: int):
+    redirect = require_auth(request)
+    if redirect:
+        return redirect
+    with database() as connection:
+        ensure_tables(connection)
+        connection.execute("DELETE FROM subscription_plans WHERE id=?", (plan_id,))
+    return RedirectResponse("/admin/plans", status_code=303)

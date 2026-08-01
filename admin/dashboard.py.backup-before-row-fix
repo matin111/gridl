@@ -1,0 +1,222 @@
+from __future__ import annotations
+
+from .common import *  # noqa: F401,F403
+
+router = APIRouter(prefix="/admin")
+
+
+FEATURE_TITLES = {
+    "analyzer": "تحلیل پیج",
+    "content_studio": "استودیو محتوا",
+    "image_generate": "ساخت تصویر",
+    "image_generator": "ساخت تصویر",
+    "image_edit": "ویرایش تصویر",
+    "video_studio": "استودیو ویدیو",
+    "planner": "برنامه رشد",
+    "text_content": "محتوای هوشمند",
+    "trends": "مرکز ترند",
+}
+
+SUCCESS_EVENT_TYPES = {"use", "success", "generated"}
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _metric(metrics: dict, key: str) -> int:
+    return _safe_int(metrics.get(key, 0))
+
+
+def _build_chart(series: list[dict]) -> str:
+    if not series:
+        return '<div class="notice">هنوز داده‌ای برای نمودار ثبت نشده است.</div>'
+
+    max_users = max([_safe_int(item.get("users")) for item in series] + [1])
+    max_usage = max([_safe_int(item.get("usage")) for item in series] + [1])
+
+    columns: list[str] = []
+
+    for item in series:
+        users = _safe_int(item.get("users"))
+        usage = _safe_int(item.get("usage"))
+        label = esc(str(item.get("label", "-")))
+
+        user_height = max(4, round(users / max_users * 160))
+        usage_height = max(4, round(usage / max_usage * 160))
+
+        columns.append(
+            f"""
+            <div class="chart-column" title="کاربر جدید: {users} | استفاده: {usage}">
+              <div class="chart-bars">
+                <div class="chart-bar users" style="height:{user_height}px"></div>
+                <div class="chart-bar usage" style="height:{usage_height}px"></div>
+              </div>
+              <div class="chart-label">{label}</div>
+            </div>
+            """
+        )
+
+    return "".join(columns)
+
+
+def _build_recent_activity(recent: list[dict]) -> str:
+    if not recent:
+        return '<div class="notice">هنوز رویدادی ثبت نشده است.</div>'
+
+    items: list[str] = []
+
+    for event in recent:
+        feature_key = str(event.get("feature_key", ""))
+        feature = FEATURE_TITLES.get(feature_key, feature_key or "قابلیت نامشخص")
+
+        event_type = str(event.get("event_type", ""))
+        event_title = "استفاده از" if event_type in SUCCESS_EVENT_TYPES else (event_type or "رویداد")
+
+        user_title = esc(str(event.get("user_title", "کاربر ناشناس")))
+        created_at = esc(str(event.get("created_at", "-")))
+
+        items.append(
+            f"""
+            <div class="activity-item">
+              <span class="activity-dot"></span>
+              <div>
+                <div class="activity-title">{user_title} — {esc(event_title)} {esc(feature)}</div>
+                <div class="activity-meta">{created_at}</div>
+              </div>
+            </div>
+            """
+        )
+
+    return "".join(items)
+
+
+@router.get(
+    "",
+    response_class=HTMLResponse,
+)
+async def dashboard(request: Request):
+    redirect = require_auth(request)
+    if redirect:
+        return redirect
+
+    metrics = dashboard_metrics() or {}
+    series = dashboard_daily_series(7) or []
+    recent = dashboard_recent_activity(8) or []
+
+    chart_html = _build_chart(series)
+    recent_activity_html = _build_recent_activity(recent)
+
+    total_users = _metric(metrics, "total_users")
+    new_users_today = _metric(metrics, "new_users_today")
+    online_users = _metric(metrics, "online_users")
+    premium_users = _metric(metrics, "premium_users")
+    free_users = _metric(metrics, "free_users")
+    usage_today = _metric(metrics, "usage_today")
+    active_campaigns = _metric(metrics, "active_campaigns")
+    enabled_notifications = _metric(metrics, "enabled_notifications")
+    blocked_users = _metric(metrics, "blocked_users")
+
+    body = f"""
+<div class="dashboard-grid">
+  <section class="card metric-card">
+    <div class="metric-head"><span class="metric-label">کل کاربران</span><span class="metric-icon">👥</span></div>
+    <div class="metric-value">{total_users}</div>
+    <div class="metric-note">{new_users_today} ثبت‌نام امروز</div>
+  </section>
+
+  <section class="card metric-card">
+    <div class="metric-head"><span class="metric-label">کاربران آنلاین</span><span class="metric-icon">🟢</span></div>
+    <div class="metric-value">{online_users}</div>
+    <div class="metric-note">فعال در ۱۵ دقیقه اخیر</div>
+  </section>
+
+  <section class="card metric-card">
+    <div class="metric-head"><span class="metric-label">رشد یار Pro</span><span class="metric-icon">⭐</span></div>
+    <div class="metric-value">{premium_users}</div>
+    <div class="metric-note">{free_users} کاربر رایگان</div>
+  </section>
+
+  <section class="card metric-card">
+    <div class="metric-head"><span class="metric-label">استفاده امروز</span><span class="metric-icon">⚡</span></div>
+    <div class="metric-value">{usage_today}</div>
+    <div class="metric-note">رویداد ثبت‌شده در ابزارها</div>
+  </section>
+
+  <section class="card metric-card">
+    <div class="metric-head"><span class="metric-label">کاربران رایگان</span><span class="metric-icon">🆓</span></div>
+    <div class="metric-value">{free_users}</div>
+    <div class="metric-note">قابل تبدیل به اشتراک Pro</div>
+  </section>
+
+  <section class="card metric-card">
+    <div class="metric-head"><span class="metric-label">کمپین‌های فعال</span><span class="metric-icon">🎯</span></div>
+    <div class="metric-value">{active_campaigns}</div>
+    <div class="metric-note">کمپین در حال نمایش</div>
+  </section>
+
+  <section class="card metric-card">
+    <div class="metric-head"><span class="metric-label">اعلان‌های فعال</span><span class="metric-icon">🔔</span></div>
+    <div class="metric-value">{enabled_notifications}</div>
+    <div class="metric-note">پیام آماده یا ارسال‌شده</div>
+  </section>
+
+  <section class="card metric-card">
+    <div class="metric-head"><span class="metric-label">کاربران مسدود</span><span class="metric-icon">⛔</span></div>
+    <div class="metric-value">{blocked_users}</div>
+    <div class="metric-note">مدیریت از صفحه کاربران</div>
+  </section>
+</div>
+
+<div class="dashboard-main">
+  <section class="card">
+    <div class="section-title">
+      <h3>رشد ۷ روز اخیر</h3>
+      <div class="legend"><span class="users">کاربر جدید</span><span class="usage">استفاده ابزارها</span></div>
+    </div>
+    <div class="chart">{chart_html}</div>
+  </section>
+
+  <section class="card">
+    <div class="section-title">
+      <h3>آخرین فعالیت‌ها</h3>
+      <a class="badge badge-pro" href="/admin/analytics">مشاهده آمار</a>
+    </div>
+    <div class="activity-list">{recent_activity_html}</div>
+  </section>
+</div>
+
+<div class="dashboard-main">
+  <section class="card">
+    <div class="section-title"><h3>دسترسی سریع</h3></div>
+    <div class="quick-grid">
+      <a class="quick-link" href="/admin/users">👥 کاربران و اشتراک‌ها</a>
+      <a class="quick-link" href="/admin/campaigns">🎯 کمپین‌ها و بنرها</a>
+      <a class="quick-link" href="/admin/notifications">🔔 ارسال اعلان</a>
+      <a class="quick-link" href="/admin/support">💬 پشتیبانی کاربران</a>
+      <a class="quick-link" href="/admin/analytics">📊 آمار استفاده</a>
+      <a class="quick-link" href="/admin/features">🧩 مدیریت قابلیت‌ها</a>
+      <a class="quick-link" href="/admin/settings">⚙️ نسخه و تنظیمات</a>
+      <a class="quick-link" href="/admin/logout">🚪 خروج از پنل</a>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="section-title"><h3>سلامت سامانه</h3></div>
+    <div class="health-row"><span>FastAPI</span><span class="health-status">● فعال</span></div>
+    <div class="health-row"><span>دیتابیس SQLite</span><span class="health-status">● متصل</span></div>
+    <div class="health-row"><span>پنل مدیریت</span><span class="health-status">● امن</span></div>
+    <div class="health-row"><span>ثبت رویدادها</span><span class="health-status">● آماده</span></div>
+  </section>
+</div>
+"""
+
+    return HTMLResponse(
+        page_layout(
+            "داشبورد مدیریت",
+            body,
+        )
+    )
