@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
+
+from growth.domain_intelligence import DOMAIN_PROFILES, DomainDetector
 
 
 @dataclass(slots=True)
@@ -46,11 +49,14 @@ class ContentAdvisor:
         if not audience:
             audience = "مخاطبان اینستاگرام"
 
-        title = f"۳ اشتباه رایج در {niche}"
+        detected = DomainDetector().detect(biography=niche, display_name=niche)
+        profile = DOMAIN_PROFILES[detected.domain]
+        subject = profile.evergreen_topics[0]
+        title = f"۳ نکته درباره {subject}"
 
         hook = (
-            f"اگر {audience} این اشتباه را انجام دهند، "
-            "رشد پیجشان متوقف می‌شود."
+            f"اگر {audience} با {profile.problems[0]} روبه‌رو هستند، "
+            f"این نکته درباره {profile.terminology[0]} را از دست ندهند."
         )
 
         scenario = [
@@ -58,31 +64,26 @@ class ContentAdvisor:
             "مشکل اصلی را نشان بده",
             "نمونه واقعی نمایش بده",
             "راه‌حل را آموزش بده",
-            "CTA واضح برای ذخیره و ارسال",
+            f"CTA تخصصی: {profile.cta}",
         ]
 
         caption = (
-            f"اگر در حوزه {niche} فعالیت می‌کنی، "
-            "این نکته می‌تواند نرخ تعاملت را افزایش دهد.\n\n"
-            "امتحانش کن و نتیجه را بررسی کن."
+            f"{profile.questions[0]}\n\n"
+            f"برای تصمیم بهتر، {profile.terminology[0]} و {profile.problems[0]} را "
+            f"جداگانه بررسی کن. این راهنما برای {audience} طراحی شده است.\n\n"
+            f"{profile.cta}"
         )
 
-        cta = (
-            "این پست را ذخیره کن و برای یک دوست ارسال کن."
-        )
+        cta = profile.cta
 
-        hashtags = [
-            "#رشد_اینستاگرام",
-            "#تولید_محتوا",
-            "#اکسپلور",
-            "#هوش_مصنوعی",
-            "#رشدیار",
+        hashtags = list(profile.hashtags[:6]) + [
+            "#" + re.sub(r"\s+", "_", topic) for topic in profile.evergreen_topics[:2]
         ]
 
         image_prompt = (
             "Premium instagram cover, modern purple branding, "
             "clean layout, studio lighting, empty title space, "
-            "social media marketing"
+            f"visual language of {detected.domain} and {profile.terminology[0]}"
         )
 
         return ContentAdvice(

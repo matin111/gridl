@@ -14,6 +14,7 @@ from instagram_analyzer import (
     verify_app_token,
     build_content_director_context,
 )
+from growth.growth_manager import GrowthContext, GrowthManager
 
 
 router = APIRouter(
@@ -1317,8 +1318,30 @@ def _build_content_director(
     avg_comments = max(float(analytics.get("average_comments") or 0.0), 0.0)
     comment_ratio = avg_comments / max(avg_likes, 1.0)
 
+    # Run the same V7 domain engine used by Analyzer's Android payload.  Media
+    # dictionaries are converted to small attribute objects because the engine
+    # intentionally accepts either API models or lightweight records.
+    media_records = [type("MediaRecord", (), item)() for item in (context.get("recent_media") or [])]
+    intelligence = GrowthManager(GrowthContext(
+        username=str(context.get("username") or ""),
+        full_name=str(context.get("full_name") or ""),
+        followers=followers,
+        following=int(context.get("following_count") or 0),
+        posts=int(context.get("media_count") or len(media_records)),
+        engagement_rate=engagement,
+        posting_consistency=consistency,
+        caption_score=caption_score,
+        best_time=best_time,
+        best_content_type=best_content_type,
+        bio=str(context.get("biography") or ""),
+        recent_media=media_records,
+    ))
+    domain_publish = intelligence._ready_to_publish()
+
     topic_selection = _select_content_topic(context, best_content_type)
     topic = topic_selection.topic
+    if not topic_selection.detection.is_seasonal:
+        topic = intelligence.domain_profile.evergreen_topics[0]
     is_video = best_content_type in {"ریلز", "ویدیو", "محتوای ترکیبی"}
     content_type = "ریلز ۲۵ تا ۳۵ ثانیه‌ای" if is_video else best_content_type
 
@@ -1357,7 +1380,12 @@ def _build_content_director(
         f"{cta}"
     )
 
-    hashtags = ["#تولید_محتوا", "#رشد_اینستاگرام", "#آموزش_اینستاگرام", "#ریلز", "#ایده_محتوا", "#بازاریابی_محتوا", "#کسب_و_کار_آنلاین", "#استراتژی_محتوا"]
+    # Replace generic values rather than adding response fields: older Android
+    # clients keep their exact schema while receiving category-safe content.
+    hook = domain_publish.hook
+    caption = domain_publish.caption
+    cta = domain_publish.cta
+    hashtags = domain_publish.hashtags
 
     signals = []
     if consistency < 55:
@@ -1370,6 +1398,7 @@ def _build_content_director(
         signals.append("میانگین بازدید نسبت به اندازه پیج پایین است")
     if not signals:
         signals.append(f"{best_content_type} بهترین فرمت محتوای اخیر تشخیص داده شده است")
+    signals.insert(0, f"حوزه {intelligence.domain.domain} با اطمینان {intelligence.domain.confidence:.0%} تشخیص داده شد")
     seasonal = topic_selection.detection
     if seasonal.is_seasonal and seasonal.relevance != "relevant":
         signals.insert(0, f"پست {seasonal.event} عملکرد خوبی داشته، اما مناسبت گذشته یا نامطمئن است؛ فقط الگوی احساسی و مشارکتی آن استفاده شد")
