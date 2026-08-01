@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException
@@ -985,6 +988,12 @@ class ContentDirectorV5(BaseModel):
     after_publish_actions: list[str] = []
     confidence_score: int
     source_signals: list[str] = []
+    # Additive seasonal metadata; existing Android fields remain unchanged.
+    is_seasonal: bool = False
+    seasonal_event: str | None = None
+    seasonal_relevance: Literal["relevant", "expired", "unknown", "not_seasonal"] = "not_seasonal"
+    seasonal_reason: str | None = None
+    reusable_pattern: str | None = None
 
 
 class AnalyzeV5Response(BaseModel):
@@ -1130,21 +1139,165 @@ def _build_next_actions(best_content_type: str, best_time: str) -> list[NextActi
     ]
 
 
-def _content_topic_from_context(context: dict, content_type: str) -> str:
+@dataclass(frozen=True)
+class SeasonalDetection:
+    is_seasonal: bool = False
+    event: str | None = None
+    relevance: str = "not_seasonal"
+    reason: str = "محتوا مناسبتی نیست."
+    reusable_pattern: str | None = None
+
+
+class SeasonalContentDetector:
+    """Deterministic event detector with deliberately conservative dating.
+
+    Events whose Gregorian date cannot be calculated without a locale or lunar
+    calendar are detected, but never assumed to be currently relevant.
+    """
+
+    EVENT_ALIASES = {
+        "یلدا": ("شب یلدا", "یلدا", "yalda"),
+        "نوروز": ("عید نوروز", "نوروز", "سال نو", "nowruz"),
+        "ولنتاین": ("ولنتاین", "valentine"),
+        "روز مادر": ("روز مادر", "mother's day", "mothers day"),
+        "روز پدر": ("روز پدر", "father's day", "fathers day"),
+        "روز زن": ("روز زن", "women's day", "womens day"),
+        "روز مرد": ("روز مرد", "men's day", "mens day"),
+        "بلک فرایدی": ("بلک فرایدی", "black friday"),
+        "کریسمس": ("کریسمس", "christmas"),
+        "عید فطر": ("عید فطر", "eid al-fitr", "eid al fitr"),
+        "عید قربان": ("عید قربان", "eid al-adha", "eid al adha"),
+        "محرم": ("محرم", "muharram"),
+        "عاشورا": ("عاشورا", "ashura"),
+        "اربعین": ("اربعین", "arbaeen", "arba'in"),
+        "ماه رمضان": ("ماه رمضان", "رمضان", "ramadan"),
+        "چهارشنبه سوری": ("چهارشنبه سوری", "چهارشنبه‌سوری", "chaharshanbe suri"),
+        "سیزده بدر": ("سیزده بدر", "سیزده‌به‌در", "سیزده به در", "sizdah bedar"),
+        "روز دختر": ("روز دختر", "daughter's day", "daughters day"),
+        "روز معلم": ("روز معلم", "teacher's day", "teachers day"),
+        "روز پزشک": ("روز پزشک", "doctor's day", "doctors day"),
+        "روز دانشجو": ("روز دانشجو", "student day", "students day"),
+    }
+    FIXED_DATES = {
+        "یلدا": (12, 21),
+        "نوروز": (3, 20),
+        "ولنتاین": (2, 14),
+        "کریسمس": (12, 25),
+        "سیزده بدر": (4, 2),
+        "روز معلم": (5, 2),
+        "روز پزشک": (8, 23),
+        "روز دانشجو": (12, 7),
+    }
+
+    def __init__(self, days_before: int = 21, days_after: int = 3):
+        self.days_before = days_before
+        self.days_after = days_after
+
+    @staticmethod
+    def _post_date(value: Any) -> date | None:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+        except ValueError:
+            return None
+
+    def _event_date(self, event: str, year: int) -> date | None:
+        if event == "بلک فرایدی":
+            thanksgiving = date(year, 11, 1)
+            thanksgiving += timedelta(days=(3 - thanksgiving.weekday()) % 7 + 21)
+            return thanksgiving + timedelta(days=1)
+        month_day = self.FIXED_DATES.get(event)
+        return date(year, *month_day) if month_day else None
+
+    def detect(self, caption: Any, hashtags: Any = None, published_at: Any = None, *, today: date | None = None) -> SeasonalDetection:
+        hashtag_text = " ".join(hashtags) if isinstance(hashtags, (list, tuple, set)) else str(hashtags or "")
+        text = f"{caption or ''} {hashtag_text}".casefold().replace("_", " ")
+        event = next((name for name, aliases in self.EVENT_ALIASES.items() if any(alias.casefold() in text for alias in aliases)), None)
+        if not event:
+            return SeasonalDetection()
+
+        pattern = "بازآفرینی الگوی موفق محتوای احساسی، مشارکتی و مناسبتی بدون تکرار موضوع " + event
+        reference = today or datetime.now(timezone.utc).date()
+        event_dates = [self._event_date(event, reference.year - 1), self._event_date(event, reference.year), self._event_date(event, reference.year + 1)]
+        event_dates = [item for item in event_dates if item is not None]
+        post_date = self._post_date(published_at)
+        if not event_dates:
+            timestamp_note = " و تاریخ انتشار نیز موجود نیست" if post_date is None else ""
+            return SeasonalDetection(True, event, "unknown", f"تاریخ {event} بدون تقویم یا منطقه مخاطب قابل محاسبه مطمئن نیست{timestamp_note}؛ موضوع دقیق تکرار نشد.", pattern)
+
+        closest = min(event_dates, key=lambda item: abs((item - reference).days))
+        distance = (closest - reference).days
+        if -self.days_after <= distance <= self.days_before:
+            return SeasonalDetection(True, event, "relevant", f"{event} در بازه مرتبط {self.days_before} روز قبل تا {self.days_after} روز بعد قرار دارد.", pattern)
+        age_note = f" پست نمونه مربوط به {post_date.isoformat()} است." if post_date else " تاریخ انتشار پست موجود نیست؛ تصمیم محافظه‌کارانه گرفته شد."
+        return SeasonalDetection(True, event, "expired", f"مناسبت {event} اکنون در بازه مرتبط نیست.{age_note}", pattern)
+
+
+@dataclass(frozen=True)
+class ContentTopicSelection:
+    topic: str
+    detection: SeasonalDetection = SeasonalDetection()
+
+
+def _clean_caption_topic(value: Any, limit: int = 72) -> str:
+    text = str(value or "").replace("\n", " ")
+    text = re.sub(r"https?://\S+|www\.\S+|@\w+|#\S+", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:بازطراحی موضوع موفق اخیر\s*:\s*)+", "", text)
+    text = re.sub(r"[\U0001F000-\U0001FAFF\u2600-\u27BF]+", " ", text)
+    text = re.sub(r"^(?:سلام(?: دوستان)?|درود|صبح بخیر|شب بخیر)[،,!؟.\s]+", "", text, flags=re.IGNORECASE)
+    parts, seen = [], set()
+    for part in re.split(r"\s*[.!؟]+\s*", text):
+        normalized = re.sub(r"\s+", " ", part).strip(" ،,:؛-")
+        key = normalized.casefold()
+        if normalized and key not in seen:
+            seen.add(key)
+            parts.append(normalized)
+    cleaned = "؛ ".join(parts)
+    return cleaned[:limit].rstrip(" ،,:؛-")
+
+
+def _media_strength(item: dict) -> float:
+    return float(item.get("like_count") or 0) + float(item.get("comment_count") or 0) * 3 + float(item.get("view_count") or 0) * 0.02
+
+
+def _select_content_topic(context: dict, content_type: str, *, today: date | None = None) -> ContentTopicSelection:
     biography = str(context.get("biography") or "").strip()
     recent_media = context.get("recent_media") or []
-    captions = [str(item.get("caption") or "").strip() for item in recent_media if str(item.get("caption") or "").strip()]
-    if captions:
-        strongest = max(
-            recent_media,
-            key=lambda item: float(item.get("like_count") or 0) + float(item.get("comment_count") or 0) * 3 + float(item.get("view_count") or 0) * 0.02,
-        )
-        caption = str(strongest.get("caption") or "").strip().replace("\n", " ")
-        if caption:
-            return f"بازطراحی موضوع موفق اخیر: {caption[:90]}"
+    detector = SeasonalContentDetector()
+    candidates = []
+    for item in recent_media:
+        cleaned = _clean_caption_topic(item.get("caption"))
+        if not cleaned:
+            continue
+        detection = detector.detect(item.get("caption"), item.get("hashtags"), item.get("published_at") or item.get("timestamp"), today=today)
+        candidates.append((item, cleaned, detection))
+
+    non_seasonal = [candidate for candidate in candidates if not candidate[2].is_seasonal]
+    if non_seasonal:
+        _, cleaned, detection = max(non_seasonal, key=lambda candidate: _media_strength(candidate[0]))
+        return ContentTopicSelection(f"بازآفرینی ایده موفق اخیر با تمرکز بر «{cleaned}»", detection)
+
+    relevant = [candidate for candidate in candidates if candidate[2].relevance == "relevant"]
+    if relevant:
+        _, _, detection = max(relevant, key=lambda candidate: _media_strength(candidate[0]))
+        return ContentTopicSelection(f"یک محتوای احساسی و مشارکتی برای {detection.event}", detection)
+
+    seasonal = [candidate for candidate in candidates if candidate[2].is_seasonal]
+    if seasonal:
+        _, _, detection = max(seasonal, key=lambda candidate: _media_strength(candidate[0]))
+        return ContentTopicSelection(detection.reusable_pattern or "یک محتوای احساسی و مناسبتی برای نزدیک‌ترین مناسبت مرتبط", detection)
     if biography:
-        return f"یک نکته کاربردی و قابل ذخیره درباره {biography[:80]}"
-    return f"یک {content_type} درباره مهم‌ترین مشکل واقعی مخاطب"
+        return ContentTopicSelection(f"یک نکته کاربردی و قابل ذخیره درباره {_clean_caption_topic(biography, 60)}")
+    return ContentTopicSelection(f"یک {content_type} درباره مهم‌ترین مشکل واقعی مخاطب")
+
+
+def _content_topic_from_context(context: dict, content_type: str) -> str:
+    return _select_content_topic(context, content_type).topic
 
 
 def _build_content_director(
@@ -1164,7 +1317,8 @@ def _build_content_director(
     avg_comments = max(float(analytics.get("average_comments") or 0.0), 0.0)
     comment_ratio = avg_comments / max(avg_likes, 1.0)
 
-    topic = _content_topic_from_context(context, best_content_type)
+    topic_selection = _select_content_topic(context, best_content_type)
+    topic = topic_selection.topic
     is_video = best_content_type in {"ریلز", "ویدیو", "محتوای ترکیبی"}
     content_type = "ریلز ۲۵ تا ۳۵ ثانیه‌ای" if is_video else best_content_type
 
@@ -1216,9 +1370,14 @@ def _build_content_director(
         signals.append("میانگین بازدید نسبت به اندازه پیج پایین است")
     if not signals:
         signals.append(f"{best_content_type} بهترین فرمت محتوای اخیر تشخیص داده شده است")
+    seasonal = topic_selection.detection
+    if seasonal.is_seasonal and seasonal.relevance != "relevant":
+        signals.insert(0, f"پست {seasonal.event} عملکرد خوبی داشته، اما مناسبت گذشته یا نامطمئن است؛ فقط الگوی احساسی و مشارکتی آن استفاده شد")
 
     recommendation_reason = "؛ ".join(signals[:3]) + "."
     confidence = _clamp_score(55 + min(int(analytics.get("analyzed_media_count") or 0), 12) * 3 + (10 if best_time != "امروز" else 0))
+    if seasonal.relevance == "unknown":
+        confidence = _clamp_score(confidence - 20)
 
     if growth_score < 45:
         predicted_growth = "با اجرای منظم این برنامه، انتظار می‌رود ابتدا نرخ تعامل و کیفیت بازدید بهتر شود؛ رشد دنبال‌کننده تدریجی خواهد بود."
@@ -1254,6 +1413,11 @@ def _build_content_director(
         after_publish_actions=after_publish_actions,
         confidence_score=confidence,
         source_signals=signals,
+        is_seasonal=seasonal.is_seasonal,
+        seasonal_event=seasonal.event,
+        seasonal_relevance=seasonal.relevance,
+        seasonal_reason=seasonal.reason if seasonal.is_seasonal else None,
+        reusable_pattern=seasonal.reusable_pattern,
     )
 
 
