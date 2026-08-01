@@ -6,6 +6,7 @@ import re
 import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from growth.growth_manager import (
     GrowthManager,
     GrowthContext,
@@ -83,6 +84,10 @@ class InstagramAnalyzeRequest(BaseModel):
         le=30,
     )
 
+    # Optional IANA timezone (for example, Asia/Tehran). Existing clients may
+    # omit it; recommendations are then explicitly labelled as UTC.
+    account_timezone: str | None = Field(default=None, max_length=100)
+
 
 class InstagramProfileResponse(BaseModel):
     id: str
@@ -122,6 +127,8 @@ class InstagramAnalyticsResponse(BaseModel):
     posts_per_week: float
     suggested_publish_hour: int | None = None
     suggested_publish_time: str | None = None
+    suggested_publish_timezone: str | None = None
+    suggested_publish_explanation: str | None = None
     best_content_type: str | None = None
 
 
@@ -282,6 +289,8 @@ def build_content_director_context(
             "public_performance_score": analytics.public_performance_score,
             "posts_per_week": analytics.posts_per_week,
             "suggested_publish_time": analytics.suggested_publish_time,
+            "suggested_publish_timezone": analytics.suggested_publish_timezone,
+            "suggested_publish_explanation": analytics.suggested_publish_explanation,
             "best_content_type": analytics.best_content_type,
         },
         "recent_media": recent_media,
@@ -439,6 +448,18 @@ def first_non_empty(
         return value
 
     return None
+
+
+def resolve_account_timezone(account_timezone: str | None) -> ZoneInfo:
+    """Return a validated account timezone, defaulting explicitly to UTC."""
+    timezone_name = (account_timezone or "UTC").strip() or "UTC"
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="منطقه زمانی حساب معتبر نیست؛ یک نام IANA مانند Asia/Tehran ارسال کنید.",
+        ) from error
 
 
 # =========================================================
@@ -1080,7 +1101,9 @@ def calculate_posts_per_week(
 def calculate_suggested_hour(
     media: list[InstagramMediaSummary],
     followers: int,
+    account_timezone: str | None = None,
 ) -> int | None:
+    timezone_info = resolve_account_timezone(account_timezone)
     hourly_scores: dict[
         int,
         list[float],
@@ -1107,9 +1130,8 @@ def calculate_suggested_hour(
         if followers > 0:
             score = score / followers * 100
 
-        hourly_scores[
-            published_at.hour
-        ].append(score)
+        localized = published_at.astimezone(timezone_info)
+        hourly_scores[localized.hour].append(score)
 
     if not hourly_scores:
         return None
@@ -1161,6 +1183,7 @@ def calculate_best_content_type(
 def calculate_analytics(
     media: list[InstagramMediaSummary],
     followers: int,
+    account_timezone: str | None = None,
 ) -> InstagramAnalyticsResponse:
     count = len(media)
 
@@ -1251,7 +1274,10 @@ def calculate_analytics(
     suggested_hour = calculate_suggested_hour(
         media=media,
         followers=followers,
+        account_timezone=account_timezone,
     )
+
+    timezone_name = account_timezone or "UTC"
 
     return InstagramAnalyticsResponse(
         analyzed_media_count=count,
@@ -1283,7 +1309,15 @@ def calculate_analytics(
             suggested_hour
         ),
         suggested_publish_time=(
-            f"{suggested_hour:02d}:00"
+            f"{suggested_hour:02d}:00 ({timezone_name})"
+            if suggested_hour is not None
+            else None
+        ),
+        suggested_publish_timezone=(timezone_name if suggested_hour is not None else None),
+        suggested_publish_explanation=(
+            f"زمان پیشنهادی بر اساس ساعت محلی حساب {timezone_name} محاسبه شده است."
+            if suggested_hour is not None and account_timezone
+            else "منطقه زمانی حساب مشخص نیست؛ زمان پیشنهادی به وقت UTC است."
             if suggested_hour is not None
             else None
         ),
@@ -1401,7 +1435,8 @@ def build_suggestions(
                     "در میان محتواهای عمومی "
                     "بررسی‌شده، انتشار نزدیک ساعت "
                     f"{analytics.suggested_publish_time} "
-                    "عملکرد بهتری داشته است."
+                    "عملکرد بهتری داشته است. "
+                    f"{analytics.suggested_publish_explanation or ''}"
                 ),
                 priority="medium",
             )
@@ -1872,6 +1907,12 @@ async def analyze_instagram_profile(
     username = normalize_instagram_username(
         request.username
     )
+    account_timezone = (
+        request.account_timezone.strip()
+        if request.account_timezone and request.account_timezone.strip()
+        else None
+    )
+    resolve_account_timezone(account_timezone)
 
     fresh_cache = load_analysis_cache(
         username=username,
@@ -1880,6 +1921,7 @@ async def analyze_instagram_profile(
 
     if (
         fresh_cache is not None
+        and account_timezone is None
         and safe_int(fresh_cache.get("audit_version")) >= 6
     ):
         return InstagramAnalyzeResponse(
@@ -2001,6 +2043,7 @@ async def analyze_instagram_profile(
         analytics = calculate_analytics(
             media=recent_media,
             followers=profile.followers_count,
+            account_timezone=account_timezone,
         )
 
         suggestions = build_suggestions(
@@ -2070,12 +2113,15 @@ async def analyze_instagram_profile(
             message=None,
         )
 
-        save_analysis_cache(
-            username=username,
-            response_data=result.model_dump(
-                mode="json"
-            ),
-        )
+        # The current cache is keyed by username only. Cache the UTC/default
+        # representation, but never leak one account timezone into another.
+        if account_timezone is None:
+            save_analysis_cache(
+                username=username,
+                response_data=result.model_dump(
+                    mode="json"
+                ),
+            )
 
         return result
 

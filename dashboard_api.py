@@ -30,6 +30,8 @@ class DashboardRequest(BaseModel):
         le=30,
     )
 
+    account_timezone: str | None = Field(default=None, max_length=100)
+
     force_refresh: bool = Field(
         default=False,
     )
@@ -646,6 +648,7 @@ async def build_online_dashboard(
         request=InstagramAnalyzeRequest(
             username=request.username,
             media_count=request.media_count,
+            account_timezone=request.account_timezone,
         ),
         authorization=authorization,
     )
@@ -1334,7 +1337,11 @@ async def analyze_profile_v5(
 ) -> AnalyzeV5Response:
     verify_app_token(authorization)
     analysis = await analyze_instagram_profile(
-        request=InstagramAnalyzeRequest(username=request.username, media_count=request.media_count),
+        request=InstagramAnalyzeRequest(
+            username=request.username,
+            media_count=request.media_count,
+            account_timezone=request.account_timezone,
+        ),
         authorization=authorization,
     )
     if not analysis.success:
