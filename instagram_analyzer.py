@@ -290,6 +290,41 @@ def build_content_director_context(
     }
 
 
+def build_growth_manager_v6(
+    analysis: InstagramAnalyzeResponse,
+    content_director: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Build the additive V6 payload from the existing public-analysis data."""
+    profile = analysis.profile
+    analytics = analysis.analytics
+    if profile is None or analytics is None:
+        return None
+
+    manager = GrowthManager(GrowthContext(
+        username=profile.username,
+        full_name=profile.full_name,
+        followers=profile.followers_count,
+        following=profile.following_count,
+        posts=profile.media_count,
+        engagement_rate=analytics.estimated_engagement_rate,
+        posting_consistency=analytics.posting_consistency_score,
+        caption_score=analytics.caption_usage_score,
+        best_time=analytics.suggested_publish_time or "زمان مناسب",
+        best_content_type=analytics.best_content_type or "محتوای ترکیبی",
+        bio=profile.biography,
+        is_verified=profile.is_verified,
+        profile_picture_url=profile.profile_picture_url or None,
+        analyzed_media_count=analytics.analyzed_media_count,
+        posts_per_week=analytics.posts_per_week,
+        average_views=analytics.average_views,
+        average_likes=analytics.average_likes,
+        average_comments=analytics.average_comments,
+        public_performance_score=analytics.public_performance_score,
+        content_director=content_director,
+    ))
+    return manager.build().model_dump(mode="json")
+
+
 # =========================================================
 # Authentication
 # =========================================================
@@ -1874,9 +1909,12 @@ async def analyze_instagram_profile(
         fresh_cache is not None
         and safe_int(fresh_cache.get("audit_version")) >= 3
     ):
-        return InstagramAnalyzeResponse(
+        cached_result = InstagramAnalyzeResponse(
             **fresh_cache
         )
+        if cached_result.growth_manager is None:
+            cached_result.growth_manager = build_growth_manager_v6(cached_result)
+        return cached_result
 
     try:
         user = await fetch_instagram_profile(
@@ -2035,6 +2073,9 @@ async def analyze_instagram_profile(
             message=None,
         )
 
+        # Additive only: legacy clients continue to read the unchanged fields.
+        result.growth_manager = build_growth_manager_v6(result)
+
         save_analysis_cache(
             username=username,
             response_data=result.model_dump(
@@ -2051,9 +2092,12 @@ async def analyze_instagram_profile(
         )
 
         if stale_cache is not None:
-            return InstagramAnalyzeResponse(
+            cached_result = InstagramAnalyzeResponse(
                 **stale_cache
             )
+            if cached_result.growth_manager is None:
+                cached_result.growth_manager = build_growth_manager_v6(cached_result)
+            return cached_result
 
         raise
 

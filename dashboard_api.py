@@ -10,6 +10,7 @@ from instagram_analyzer import (
     analyze_instagram_profile,
     verify_app_token,
     build_content_director_context,
+    build_growth_manager_v6,
 )
 
 
@@ -1003,6 +1004,7 @@ class AnalyzeV5Response(BaseModel):
     next_actions: list[NextActionV5] = []
     content_director: ContentDirectorV5
     dashboard_data: DashboardResponse
+    growth_manager: dict | None = None
     source: str = "instagram_analyze_v5"
     message: str | None = None
 
@@ -1406,6 +1408,10 @@ async def analyze_profile_v5(
         best_time=best_time,
         growth_score=final_score,
     )
+    growth_manager = build_growth_manager_v6(
+        analysis,
+        content_director.model_dump(mode="json"),
+    )
 
     return AnalyzeV5Response(
         success=True,
@@ -1435,6 +1441,7 @@ async def analyze_profile_v5(
         next_actions=_build_next_actions(best_content_type, best_time),
         content_director=content_director,
         dashboard_data=dashboard,
+        growth_manager=growth_manager,
         source="instagram_analyze_v5",
         message=None,
     )
