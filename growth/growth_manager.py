@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
-
 from growth.growth_models import (
     GrowthManagerResponse,
     Recommendation,
@@ -11,6 +9,9 @@ from growth.growth_models import (
     ProfileDoctor,
     HighlightDoctor,
     ReadyToPublish,
+    ContentDiagnosis,
+    WeeklyRoadmapItem,
+    GrowthForecast,
 )
 
 
@@ -36,18 +37,64 @@ class GrowthManager:
         self.ctx = ctx
 
     def build(self) -> GrowthManagerResponse:
-
         score = self._growth_score()
 
+        tasks = self._tasks()
+
         return GrowthManagerResponse(
+            executive_summary=self._executive_summary(score),
             growth_score=score,
             daily_focus=self._daily_focus(),
             recommendations=self._recommendations(),
-            daily_tasks=self._tasks(),
+            daily_tasks=tasks,
+            daily_missions=tasks,
+            content_diagnosis=self._content_diagnosis(),
+            weekly_roadmap=self._weekly_roadmap(),
+            growth_forecast=self._growth_forecast(),
             bio=self._bio_doctor(),
             profile=self._profile_doctor(),
             highlights=self._highlight_doctor(),
             publish=self._ready_to_publish(),
+        )
+
+    def _executive_summary(self, score: int) -> str:
+        if score >= 75:
+            status = "پایه رشد پیج مناسب است"
+        elif score >= 50:
+            status = "پیج ظرفیت رشد دارد اما چند مانع قابل اصلاح دیده می‌شود"
+        else:
+            status = "پیج پیش از افزایش حجم محتوا به اصلاح پایه نیاز دارد"
+        return (
+            f"{status}. امتیاز رشد {score} از ۱۰۰ است؛ اولویت فعلی: "
+            f"{self._daily_focus()}"
+        )
+
+    def _content_diagnosis(self) -> ContentDiagnosis:
+        engagement = "healthy" if self.ctx.engagement_rate >= 3 else "needs_experiment"
+        consistency = "healthy" if self.ctx.posting_consistency >= 65 else "needs_improvement"
+        captions = "healthy" if self.ctx.caption_score >= 80 else "needs_improvement"
+        return ContentDiagnosis(
+            summary="تشخیص بر اساس تعامل عمومی، نظم انتشار و پوشش کپشن محتوای اخیر است.",
+            strongest_format=self.ctx.best_content_type or "نامشخص",
+            engagement_status=engagement,
+            consistency_status=consistency,
+            caption_status=captions,
+        )
+
+    def _weekly_roadmap(self) -> list[WeeklyRoadmapItem]:
+        return [
+            WeeklyRoadmapItem(week=1, objective="اصلاح پایه", missions=["به‌روزرسانی بیو", "تعیین سه ستون محتوا"], success_metric="تکمیل پروفایل و تقویم"),
+            WeeklyRoadmapItem(week=2, objective="آزمایش محتوا", missions=["انتشار سه محتوای منظم", "آزمایش دو هوک"], success_metric="ثبت عملکرد سه محتوا"),
+            WeeklyRoadmapItem(week=3, objective="تقویت تعامل", missions=["CTA مشخص در هر کپشن", "پاسخ به کامنت‌ها"], success_metric="بهبود تعامل نسبت به هفته دوم"),
+            WeeklyRoadmapItem(week=4, objective="تکرار الگوی برتر", missions=["مقایسه فرمت‌ها", "بازطراحی بهترین موضوع"], success_metric="شناسایی یک الگوی تکرارپذیر"),
+        ]
+
+    def _growth_forecast(self) -> GrowthForecast:
+        sample_confidence = "medium" if self.ctx.posts >= 12 else "low"
+        return GrowthForecast(
+            expected_outcome="در صورت اجرای منظم، امکان بهبود تدریجی تعامل و ثبات انتشار وجود دارد.",
+            confidence=sample_confidence,
+            assumptions=["اجرای کامل برنامه چهار هفته‌ای", "ثبات موضوع و کیفیت محتوا", "اندازه‌گیری هفتگی نتایج"],
         )
 
     def _growth_score(self) -> int:
@@ -260,4 +307,3 @@ class GrowthManager:
                 "high contrast, social media post"
             ),
         )
-

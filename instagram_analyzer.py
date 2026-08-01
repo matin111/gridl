@@ -194,18 +194,18 @@ class InstagramAnalyzeResponse(BaseModel):
     success: bool
     profile: InstagramProfileResponse | None = None
     analytics: InstagramAnalyticsResponse | None = None
-    recent_media: list[InstagramMediaSummary] = []
-    suggestions: list[InstagramSuggestion] = []
+    recent_media: list[InstagramMediaSummary] = Field(default_factory=list)
+    suggestions: list[InstagramSuggestion] = Field(default_factory=list)
     audit: InstagramAuditScores | None = None
-    strengths: list[InstagramAuditInsight] = []
-    weaknesses: list[InstagramAuditInsight] = []
+    strengths: list[InstagramAuditInsight] = Field(default_factory=list)
+    weaknesses: list[InstagramAuditInsight] = Field(default_factory=list)
     bio_analysis: InstagramBioAnalysis | None = None
     content_analysis: InstagramContentAnalysis | None = None
     posting_plan: InstagramPostingPlan | None = None
-    growth_plan: list[InstagramGrowthAction] = []
+    growth_plan: list[InstagramGrowthAction] = Field(default_factory=list)
 
     # V6 findings retain the observations and sample size behind each claim.
-    evidence_findings: list[dict[str, Any]] = []
+    evidence_findings: list[dict[str, Any]] = Field(default_factory=list)
 
     # AI Growth Manager
     growth_manager: dict[str, Any] | None = None
@@ -246,6 +246,8 @@ def build_content_director_context(
             "weaknesses": [],
             "suggestions": [],
             "growth_plan": [],
+            "growth_manager": None,
+            "evidence_findings": [],
         }
 
     recent_media = []
@@ -287,6 +289,8 @@ def build_content_director_context(
         "weaknesses": [item.model_dump(mode="json") for item in (analysis.weaknesses or [])],
         "suggestions": [item.model_dump(mode="json") for item in (analysis.suggestions or [])],
         "growth_plan": [item.model_dump(mode="json") for item in (analysis.growth_plan or [])],
+        "growth_manager": analysis.growth_manager,
+        "evidence_findings": analysis.evidence_findings,
         "bio_analysis": analysis.bio_analysis.model_dump(mode="json") if analysis.bio_analysis else None,
         "content_analysis": analysis.content_analysis.model_dump(mode="json") if analysis.content_analysis else None,
         "posting_plan": analysis.posting_plan.model_dump(mode="json") if analysis.posting_plan else None,
@@ -2026,6 +2030,23 @@ async def analyze_instagram_profile(
             posts_per_week=analytics.posts_per_week,
         )
 
+        growth_manager = GrowthManager(
+            GrowthContext(
+                username=profile.username,
+                full_name=profile.full_name,
+                followers=profile.followers_count,
+                following=profile.following_count,
+                posts=profile.media_count,
+                engagement_rate=analytics.estimated_engagement_rate,
+                posting_consistency=analytics.posting_consistency_score,
+                caption_score=analytics.caption_usage_score,
+                best_time=analytics.suggested_publish_time or "نامشخص",
+                best_content_type=analytics.best_content_type or "محتوا",
+                bio=profile.biography,
+                is_verified=profile.is_verified,
+            )
+        ).build()
+
         result = InstagramAnalyzeResponse(
             success=True,
             profile=profile,
@@ -2040,6 +2061,7 @@ async def analyze_instagram_profile(
             posting_plan=posting_plan,
             growth_plan=growth_plan,
             evidence_findings=evidence_findings,
+            growth_manager=growth_manager.model_dump(mode="json"),
             audit_version=6,
             source="boxapi_public_analysis_v6",
             analyzed_at=datetime.now(

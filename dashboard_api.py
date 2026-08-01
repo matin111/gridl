@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -1003,6 +1003,9 @@ class AnalyzeV5Response(BaseModel):
     next_actions: list[NextActionV5] = []
     content_director: ContentDirectorV5
     dashboard_data: DashboardResponse
+    # Additive V6 data; all V5/Android response fields remain unchanged.
+    growth_manager: dict[str, Any] | None = None
+    evidence_findings: list[dict[str, Any]] = Field(default_factory=list)
     source: str = "instagram_analyze_v5"
     message: str | None = None
 
@@ -1435,6 +1438,8 @@ async def analyze_profile_v5(
         next_actions=_build_next_actions(best_content_type, best_time),
         content_director=content_director,
         dashboard_data=dashboard,
+        growth_manager=analysis.growth_manager,
+        evidence_findings=analysis.evidence_findings,
         source="instagram_analyze_v5",
         message=None,
     )
