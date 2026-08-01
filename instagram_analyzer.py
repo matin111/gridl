@@ -10,6 +10,8 @@ from growth.growth_manager import (
     GrowthManager,
     GrowthContext,
 )
+from growth.evidence_engine import EvidenceEngine
+from growth.reasoning_engine import ReasoningEngine
 
 from typing import Any
 
@@ -206,7 +208,10 @@ class InstagramAnalyzeResponse(BaseModel):
     # AI Growth Manager
     growth_manager: dict[str, Any] | None = None
 
-    audit_version: int = 4
+    # Evidence-driven intelligence (V6)
+    intelligence: dict[str, Any] | None = None
+
+    audit_version: int = 6
     source: str
     analyzed_at: str | None = None
     message: str | None = None
@@ -287,6 +292,7 @@ def build_content_director_context(
         "content_analysis": analysis.content_analysis.model_dump(mode="json") if analysis.content_analysis else None,
         "posting_plan": analysis.posting_plan.model_dump(mode="json") if analysis.posting_plan else None,
         "audit": analysis.audit.model_dump(mode="json") if analysis.audit else None,
+        "intelligence": analysis.intelligence,
     }
 
 
@@ -1872,7 +1878,7 @@ async def analyze_instagram_profile(
 
     if (
         fresh_cache is not None
-        and safe_int(fresh_cache.get("audit_version")) >= 3
+        and safe_int(fresh_cache.get("audit_version")) >= 6
     ):
         return InstagramAnalyzeResponse(
             **fresh_cache
@@ -2027,8 +2033,11 @@ async def analyze_instagram_profile(
             content_analysis=content_analysis,
             posting_plan=posting_plan,
             growth_plan=growth_plan,
-            audit_version=3,
-            source="boxapi_public_analysis_v3",
+            intelligence=ReasoningEngine().analyze(
+                EvidenceEngine().collect(recent_media, profile.followers_count)
+            ),
+            audit_version=6,
+            source="boxapi_public_analysis_v6",
             analyzed_at=datetime.now(
                 timezone.utc
             ).isoformat(),
@@ -2079,7 +2088,8 @@ async def analyze_instagram_profile(
             content_analysis=None,
             posting_plan=None,
             growth_plan=[],
-            audit_version=3,
+            intelligence=None,
+            audit_version=6,
             source="error",
             analyzed_at=None,
             message=str(error),
