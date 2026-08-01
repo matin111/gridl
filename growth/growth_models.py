@@ -48,7 +48,31 @@ class ReadyToPublish(BaseModel):
     image_prompt: str = ""
 
 
+class ContentDiagnosis(BaseModel):
+    summary: str
+    strongest_format: str
+    engagement_status: str
+    consistency_status: str
+    caption_status: str
+
+
+class WeeklyRoadmapItem(BaseModel):
+    week: int
+    objective: str
+    missions: list[str] = Field(default_factory=list)
+    success_metric: str
+
+
+class GrowthForecast(BaseModel):
+    horizon_days: int = 30
+    expected_outcome: str
+    confidence: str
+    assumptions: list[str] = Field(default_factory=list)
+
+
 class GrowthManagerResponse(BaseModel):
+    executive_summary: str
+
     growth_score: int
 
     daily_focus: str
@@ -56,6 +80,15 @@ class GrowthManagerResponse(BaseModel):
     recommendations: list[Recommendation]
 
     daily_tasks: list[DailyTask]
+
+    # Keep daily_tasks for Android clients; daily_missions is the V6 name.
+    daily_missions: list[DailyTask]
+
+    content_diagnosis: ContentDiagnosis
+
+    weekly_roadmap: list[WeeklyRoadmapItem]
+
+    growth_forecast: GrowthForecast
 
     bio: BioDoctor
 

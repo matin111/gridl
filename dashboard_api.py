@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -29,6 +29,8 @@ class DashboardRequest(BaseModel):
         ge=3,
         le=30,
     )
+
+    account_timezone: str | None = Field(default=None, max_length=100)
 
     force_refresh: bool = Field(
         default=False,
@@ -646,6 +648,7 @@ async def build_online_dashboard(
         request=InstagramAnalyzeRequest(
             username=request.username,
             media_count=request.media_count,
+            account_timezone=request.account_timezone,
         ),
         authorization=authorization,
     )
@@ -1003,6 +1006,9 @@ class AnalyzeV5Response(BaseModel):
     next_actions: list[NextActionV5] = []
     content_director: ContentDirectorV5
     dashboard_data: DashboardResponse
+    # Additive V6 data; all V5/Android response fields remain unchanged.
+    growth_manager: dict[str, Any] | None = None
+    evidence_findings: list[dict[str, Any]] = Field(default_factory=list)
     source: str = "instagram_analyze_v5"
     message: str | None = None
 
@@ -1331,7 +1337,11 @@ async def analyze_profile_v5(
 ) -> AnalyzeV5Response:
     verify_app_token(authorization)
     analysis = await analyze_instagram_profile(
-        request=InstagramAnalyzeRequest(username=request.username, media_count=request.media_count),
+        request=InstagramAnalyzeRequest(
+            username=request.username,
+            media_count=request.media_count,
+            account_timezone=request.account_timezone,
+        ),
         authorization=authorization,
     )
     if not analysis.success:
@@ -1435,6 +1445,8 @@ async def analyze_profile_v5(
         next_actions=_build_next_actions(best_content_type, best_time),
         content_director=content_director,
         dashboard_data=dashboard,
+        growth_manager=analysis.growth_manager,
+        evidence_findings=analysis.evidence_findings,
         source="instagram_analyze_v5",
         message=None,
     )
