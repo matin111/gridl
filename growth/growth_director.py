@@ -90,39 +90,77 @@ def _health_score(
     }
 
 
+def _priority_payload(
+    *,
+    key: Any,
+    title: Any,
+    instruction: Any,
+    why: Any,
+    evidence: Any,
+    impact_score: Any,
+    confidence_score: Any,
+    priority_score: Any,
+    estimated_minutes: Any,
+    success_metric: Any,
+) -> dict[str, Any]:
+    """Return one stable priority schema for API and Android clients.
+
+    The canonical names are instruction, why and score. The older action,
+    reason and priority_score aliases remain additive for compatibility.
+    """
+    normalized_instruction = str(instruction or "").strip() or None
+    normalized_why = str(why or "").strip() or None
+    normalized_score = _clamp(priority_score)
+    return {
+        "key": key,
+        "title": title,
+        "instruction": normalized_instruction,
+        "why": normalized_why,
+        "score": normalized_score,
+        "action": normalized_instruction,
+        "reason": normalized_why,
+        "priority_score": normalized_score,
+        "evidence": list(evidence or []),
+        "impact_score": _clamp(impact_score),
+        "confidence_score": _clamp(confidence_score),
+        "estimated_minutes": max(1, int(_number(estimated_minutes, 15))),
+        "success_metric": success_metric,
+    }
+
+
 def _priority_items(ai_growth_coach: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     if not ai_growth_coach:
         return []
     items: list[dict[str, Any]] = []
     today = ai_growth_coach.get("today_action")
     if isinstance(today, Mapping):
-        items.append({
-            "key": today.get("key"),
-            "title": today.get("title"),
-            "action": today.get("instruction"),
-            "reason": today.get("why"),
-            "evidence": list(today.get("evidence") or []),
-            "impact_score": _clamp(today.get("impact_score")),
-            "confidence_score": _clamp(today.get("confidence_score")),
-            "priority_score": _clamp(today.get("priority_score")),
-            "estimated_minutes": int(_number(today.get("estimated_minutes"), 15)),
-            "success_metric": today.get("success_metric"),
-        })
+        items.append(_priority_payload(
+            key=today.get("key"),
+            title=today.get("title"),
+            instruction=today.get("instruction"),
+            why=today.get("why"),
+            evidence=today.get("evidence"),
+            impact_score=today.get("impact_score"),
+            confidence_score=today.get("confidence_score"),
+            priority_score=today.get("priority_score"),
+            estimated_minutes=today.get("estimated_minutes"),
+            success_metric=today.get("success_metric"),
+        ))
     for item in ai_growth_coach.get("next_priorities", []) or []:
         if not isinstance(item, Mapping):
             continue
-        items.append({
-            "key": item.get("key"),
-            "title": item.get("title"),
-            "action": item.get("recommendation"),
-            "reason": item.get("problem"),
-            "evidence": list(item.get("evidence") or []),
-            "impact_score": _clamp(item.get("impact")),
-            "confidence_score": _clamp(item.get("confidence")),
-            "priority_score": _clamp(item.get("score")),
-            "estimated_minutes": 15,
-            "success_metric": None,
-        })
+        items.append(_priority_payload(
+            key=item.get("key"),
+            title=item.get("title"),
+            instruction=item.get("recommendation"),
+            why=item.get("problem"),
+            evidence=item.get("evidence"),
+            impact_score=item.get("impact"),
+            confidence_score=item.get("confidence"),
+            priority_score=item.get("score"),
+            estimated_minutes=15,
+            success_metric=None,
+        ))
     return items[:3]
 
 
