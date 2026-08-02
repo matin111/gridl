@@ -10,6 +10,9 @@ from typing import Any, Mapping
 import httpx
 from dotenv import load_dotenv
 
+from growth.pattern_discovery_v11 import discover_visual_patterns
+from growth.visual_reviewer import attach_visual_reviews
+
 
 # This module can be imported before instagram_analyzer calls load_dotenv().
 # Load the project environment here so Vision works with keys stored in .env.
@@ -241,4 +244,7 @@ async def enrich_post_intelligence_with_vision(
     result["visual_analysis_completed"] = completed_count
     result["visual_analysis_requested"] = len(selected)
     result["visual_provider"] = "openai" if selected else None
-    return result
+
+    reviewed = attach_visual_reviews(result) or result
+    reviewed["visual_patterns"] = discover_visual_patterns(reviewed)
+    return reviewed
