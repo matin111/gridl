@@ -12,6 +12,7 @@ from growth.growth_manager import (
     GrowthContext,
 )
 from growth.evidence_engine import build_evidence_findings
+from growth.profile_audit_adapter import build_profile_audit_payload
 
 from typing import Any
 
@@ -217,7 +218,10 @@ class InstagramAnalyzeResponse(BaseModel):
     # AI Growth Manager
     growth_manager: dict[str, Any] | None = None
 
-    audit_version: int = 6
+    # V10 evidence-based profile audit; additive for Android compatibility.
+    profile_audit: dict[str, Any] | None = None
+
+    audit_version: int = 10
     source: str
     analyzed_at: str | None = None
     message: str | None = None
@@ -255,6 +259,7 @@ def build_content_director_context(
             "growth_plan": [],
             "growth_manager": None,
             "evidence_findings": [],
+            "profile_audit": None,
         }
 
     recent_media = []
@@ -300,6 +305,7 @@ def build_content_director_context(
         "growth_plan": [item.model_dump(mode="json") for item in (analysis.growth_plan or [])],
         "growth_manager": analysis.growth_manager,
         "evidence_findings": analysis.evidence_findings,
+        "profile_audit": analysis.profile_audit,
         "bio_analysis": analysis.bio_analysis.model_dump(mode="json") if analysis.bio_analysis else None,
         "content_analysis": analysis.content_analysis.model_dump(mode="json") if analysis.content_analysis else None,
         "posting_plan": analysis.posting_plan.model_dump(mode="json") if analysis.posting_plan else None,
@@ -1922,11 +1928,14 @@ async def analyze_instagram_profile(
     if (
         fresh_cache is not None
         and account_timezone is None
-        and safe_int(fresh_cache.get("audit_version")) >= 6
+        and safe_int(fresh_cache.get("audit_version")) >= 7
     ):
-        return InstagramAnalyzeResponse(
-            **fresh_cache
-        )
+        cached_profile = fresh_cache.get("profile")
+        if cached_profile and not fresh_cache.get("profile_audit"):
+            fresh_cache = dict(fresh_cache)
+            fresh_cache["profile_audit"] = build_profile_audit_payload(cached_profile)
+            fresh_cache["audit_version"] = 10
+        return InstagramAnalyzeResponse(**fresh_cache)
 
     try:
         user = await fetch_instagram_profile(
@@ -2091,6 +2100,8 @@ async def analyze_instagram_profile(
             )
         ).build()
 
+        profile_audit = build_profile_audit_payload(profile)
+
         result = InstagramAnalyzeResponse(
             success=True,
             profile=profile,
@@ -2106,8 +2117,9 @@ async def analyze_instagram_profile(
             growth_plan=growth_plan,
             evidence_findings=evidence_findings,
             growth_manager=growth_manager.model_dump(mode="json"),
-            audit_version=7,
-            source="boxapi_public_analysis_v7",
+            profile_audit=profile_audit,
+            audit_version=10,
+            source="boxapi_public_analysis_v10",
             analyzed_at=datetime.now(
                 timezone.utc
             ).isoformat(),
@@ -2133,9 +2145,12 @@ async def analyze_instagram_profile(
         )
 
         if stale_cache is not None:
-            return InstagramAnalyzeResponse(
-                **stale_cache
-            )
+            stale_cache = dict(stale_cache)
+            cached_profile = stale_cache.get("profile")
+            if cached_profile and not stale_cache.get("profile_audit"):
+                stale_cache["profile_audit"] = build_profile_audit_payload(cached_profile)
+                stale_cache["audit_version"] = 10
+            return InstagramAnalyzeResponse(**stale_cache)
 
         raise
 
@@ -2162,7 +2177,8 @@ async def analyze_instagram_profile(
             posting_plan=None,
             growth_plan=[],
             evidence_findings=[],
-            audit_version=6,
+            profile_audit=None,
+            audit_version=10,
             source="error",
             analyzed_at=None,
             message=str(error),
