@@ -8,7 +8,12 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 import httpx
+from dotenv import load_dotenv
 
+
+# This module can be imported before instagram_analyzer calls load_dotenv().
+# Load the project environment here so Vision works with keys stored in .env.
+load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
