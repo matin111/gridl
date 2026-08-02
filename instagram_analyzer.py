@@ -14,6 +14,7 @@ from growth.growth_manager import (
 from growth.evidence_engine import build_evidence_findings
 from growth.profile_audit_adapter import build_profile_audit_payload
 from growth.content_audit_adapter import build_content_audit_payload
+from growth.growth_coach_adapter import build_growth_coach_payload
 
 from typing import Any
 
@@ -224,6 +225,9 @@ class InstagramAnalyzeResponse(BaseModel):
 
     # V10 evidence-based content audit; additive for Android compatibility.
     content_audit: dict[str, Any] | None = None
+
+    # V10 decision layer: one action today plus the next priorities.
+    ai_growth_coach: dict[str, Any] | None = None
 
     audit_version: int = 10
     source: str
@@ -1938,12 +1942,21 @@ async def analyze_instagram_profile(
     ):
         cached_profile = fresh_cache.get("profile")
         cached_media = fresh_cache.get("recent_media") or []
-        if (cached_profile and not fresh_cache.get("profile_audit")) or not fresh_cache.get("content_audit"):
+        if (
+            (cached_profile and not fresh_cache.get("profile_audit"))
+            or not fresh_cache.get("content_audit")
+            or not fresh_cache.get("ai_growth_coach")
+        ):
             fresh_cache = dict(fresh_cache)
             if cached_profile and not fresh_cache.get("profile_audit"):
                 fresh_cache["profile_audit"] = build_profile_audit_payload(cached_profile)
             if not fresh_cache.get("content_audit"):
                 fresh_cache["content_audit"] = build_content_audit_payload(cached_media)
+            if not fresh_cache.get("ai_growth_coach"):
+                fresh_cache["ai_growth_coach"] = build_growth_coach_payload(
+                    profile_audit=fresh_cache.get("profile_audit"),
+                    content_audit=fresh_cache.get("content_audit"),
+                )
             fresh_cache["audit_version"] = 10
         return InstagramAnalyzeResponse(**fresh_cache)
 
@@ -2112,6 +2125,10 @@ async def analyze_instagram_profile(
 
         profile_audit = build_profile_audit_payload(profile)
         content_audit = build_content_audit_payload(recent_media)
+        ai_growth_coach = build_growth_coach_payload(
+            profile_audit=profile_audit,
+            content_audit=content_audit,
+        )
 
         result = InstagramAnalyzeResponse(
             success=True,
@@ -2130,6 +2147,7 @@ async def analyze_instagram_profile(
             growth_manager=growth_manager.model_dump(mode="json"),
             profile_audit=profile_audit,
             content_audit=content_audit,
+            ai_growth_coach=ai_growth_coach,
             audit_version=10,
             source="boxapi_public_analysis_v10",
             analyzed_at=datetime.now(
@@ -2164,6 +2182,11 @@ async def analyze_instagram_profile(
                 stale_cache["profile_audit"] = build_profile_audit_payload(cached_profile)
             if not stale_cache.get("content_audit"):
                 stale_cache["content_audit"] = build_content_audit_payload(cached_media)
+            if not stale_cache.get("ai_growth_coach"):
+                stale_cache["ai_growth_coach"] = build_growth_coach_payload(
+                    profile_audit=stale_cache.get("profile_audit"),
+                    content_audit=stale_cache.get("content_audit"),
+                )
             stale_cache["audit_version"] = 10
             return InstagramAnalyzeResponse(**stale_cache)
 
@@ -2194,6 +2217,7 @@ async def analyze_instagram_profile(
             evidence_findings=[],
             profile_audit=None,
             content_audit=None,
+            ai_growth_coach=None,
             audit_version=10,
             source="error",
             analyzed_at=None,
