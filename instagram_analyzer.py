@@ -13,6 +13,7 @@ from growth.growth_manager import (
 )
 from growth.evidence_engine import build_evidence_findings
 from growth.profile_audit_adapter import build_profile_audit_payload
+from growth.content_audit_adapter import build_content_audit_payload
 
 from typing import Any
 
@@ -221,6 +222,9 @@ class InstagramAnalyzeResponse(BaseModel):
     # V10 evidence-based profile audit; additive for Android compatibility.
     profile_audit: dict[str, Any] | None = None
 
+    # V10 evidence-based content audit; additive for Android compatibility.
+    content_audit: dict[str, Any] | None = None
+
     audit_version: int = 10
     source: str
     analyzed_at: str | None = None
@@ -260,6 +264,7 @@ def build_content_director_context(
             "growth_manager": None,
             "evidence_findings": [],
             "profile_audit": None,
+            "content_audit": None,
         }
 
     recent_media = []
@@ -306,6 +311,7 @@ def build_content_director_context(
         "growth_manager": analysis.growth_manager,
         "evidence_findings": analysis.evidence_findings,
         "profile_audit": analysis.profile_audit,
+        "content_audit": analysis.content_audit,
         "bio_analysis": analysis.bio_analysis.model_dump(mode="json") if analysis.bio_analysis else None,
         "content_analysis": analysis.content_analysis.model_dump(mode="json") if analysis.content_analysis else None,
         "posting_plan": analysis.posting_plan.model_dump(mode="json") if analysis.posting_plan else None,
@@ -1931,9 +1937,13 @@ async def analyze_instagram_profile(
         and safe_int(fresh_cache.get("audit_version")) >= 7
     ):
         cached_profile = fresh_cache.get("profile")
-        if cached_profile and not fresh_cache.get("profile_audit"):
+        cached_media = fresh_cache.get("recent_media") or []
+        if (cached_profile and not fresh_cache.get("profile_audit")) or not fresh_cache.get("content_audit"):
             fresh_cache = dict(fresh_cache)
-            fresh_cache["profile_audit"] = build_profile_audit_payload(cached_profile)
+            if cached_profile and not fresh_cache.get("profile_audit"):
+                fresh_cache["profile_audit"] = build_profile_audit_payload(cached_profile)
+            if not fresh_cache.get("content_audit"):
+                fresh_cache["content_audit"] = build_content_audit_payload(cached_media)
             fresh_cache["audit_version"] = 10
         return InstagramAnalyzeResponse(**fresh_cache)
 
@@ -2101,6 +2111,7 @@ async def analyze_instagram_profile(
         ).build()
 
         profile_audit = build_profile_audit_payload(profile)
+        content_audit = build_content_audit_payload(recent_media)
 
         result = InstagramAnalyzeResponse(
             success=True,
@@ -2118,6 +2129,7 @@ async def analyze_instagram_profile(
             evidence_findings=evidence_findings,
             growth_manager=growth_manager.model_dump(mode="json"),
             profile_audit=profile_audit,
+            content_audit=content_audit,
             audit_version=10,
             source="boxapi_public_analysis_v10",
             analyzed_at=datetime.now(
@@ -2147,9 +2159,12 @@ async def analyze_instagram_profile(
         if stale_cache is not None:
             stale_cache = dict(stale_cache)
             cached_profile = stale_cache.get("profile")
+            cached_media = stale_cache.get("recent_media") or []
             if cached_profile and not stale_cache.get("profile_audit"):
                 stale_cache["profile_audit"] = build_profile_audit_payload(cached_profile)
-                stale_cache["audit_version"] = 10
+            if not stale_cache.get("content_audit"):
+                stale_cache["content_audit"] = build_content_audit_payload(cached_media)
+            stale_cache["audit_version"] = 10
             return InstagramAnalyzeResponse(**stale_cache)
 
         raise
@@ -2178,6 +2193,7 @@ async def analyze_instagram_profile(
             growth_plan=[],
             evidence_findings=[],
             profile_audit=None,
+            content_audit=None,
             audit_version=10,
             source="error",
             analyzed_at=None,
