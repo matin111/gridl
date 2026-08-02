@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Mapping
 
 import httpx
@@ -13,6 +14,21 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_CONTENT_MODEL = os.getenv("OPENAI_CONTENT_MODEL", os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")).strip()
 CONTENT_DIRECTOR_TIMEOUT = float(os.getenv("CONTENT_DIRECTOR_TIMEOUT", "60"))
+
+
+_PERCENT_CLAIM_RE = re.compile(
+    r"(?:حداقل\s*)?[۰-۹0-9]+(?:[٫.,][۰-۹0-9]+)?\s*٪(?:\s*(?:افزایش|بهبود|کاهش))?",
+    re.IGNORECASE,
+)
+_GUARANTEE_REPLACEMENTS = {
+    "امنیت شما را تضمین می‌کند": "برای افزایش امنیت اتصال طراحی شده است",
+    "امنیت شما را تضمین می کند": "برای افزایش امنیت اتصال طراحی شده است",
+    "امنیت تضمین شد": "تنظیمات امنیتی تقویت شد",
+    "تضمین می‌کند": "می‌تواند کمک‌کننده باشد",
+    "تضمین می کند": "می‌تواند کمک‌کننده باشد",
+    "تضمینی": "قطعی",
+    "تضمین": "اطمینان قطعی",
+}
 
 
 def _compact_posts(post_intelligence: Mapping[str, Any] | None, limit: int = 6) -> list[dict[str, Any]]:
@@ -118,10 +134,33 @@ def _extract_output_text(payload: Mapping[str, Any]) -> str:
     return ""
 
 
+def _sanitize_text(value: str, warnings: list[str]) -> str:
+    text = value
+    if _PERCENT_CLAIM_RE.search(text):
+        text = _PERCENT_CLAIM_RE.sub("بهبود احتمالی", text)
+        warnings.append("ادعای درصدی بدون شواهد حذف شد")
+    for source, replacement in _GUARANTEE_REPLACEMENTS.items():
+        if source in text:
+            text = text.replace(source, replacement)
+            warnings.append("عبارت تضمینی بدون شواهد تعدیل شد")
+    return text
+
+
+def _sanitize_generated(value: Any, warnings: list[str]) -> Any:
+    if isinstance(value, str):
+        return _sanitize_text(value, warnings)
+    if isinstance(value, list):
+        return [_sanitize_generated(item, warnings) for item in value]
+    if isinstance(value, Mapping):
+        return {key: _sanitize_generated(item, warnings) for key, item in value.items()}
+    return value
+
+
 def _normalize_result(data: Mapping[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
     next_content = context.get("next_content") or {}
     publish_time = next_content.get("publish_time") or {}
-    result = dict(data)
+    warnings: list[str] = []
+    result = dict(_sanitize_generated(dict(data), warnings))
     result.update({
         "version": 13,
         "status": "ready",
@@ -136,6 +175,7 @@ def _normalize_result(data: Mapping[str, Any], context: Mapping[str, Any]) -> di
     result.setdefault("scenario", [])
     result.setdefault("hashtags", [])
     result.setdefault("limitations", ["این پیشنهاد تضمین رشد نیست و باید با نتیجه واقعی انتشار ارزیابی شود."])
+    result["quality_warnings"] = list(dict.fromkeys(warnings))
     return result
 
 
@@ -162,7 +202,10 @@ async def generate_content_director(
     instructions = (
         "تو کارگردان محتوای حرفه‌ای اینستاگرام هستی. فقط یک محتوای منسجم، اختصاصی و آماده انتشار تولید کن. "
         "خروجی باید فارسی، طبیعی، غیرعمومی و دقیقاً متناسب با حوزه واقعی پیج باشد. "
-        "از ادعای آماری بدون شواهد، هشتگ عمومی نامرتبط و تکرار متن‌های نمونه خودداری کن. "
+        "هیچ درصد رشد، افزایش سرعت، بهبود فروش، نتیجه قطعی، تضمین امنیت یا ادعای عددی نساز مگر آن عدد صریحاً در context به‌عنوان شاهد معتبر آمده باشد. "
+        "برای measurement فقط روش مقایسه با میانگین اخیر را بنویس و هدف درصدی تعیین نکن. "
+        "درباره امنیت سایبری از واژه‌هایی مانند تضمین، کاملاً امن یا بدون نشت استفاده نکن؛ نتیجه به سرویس، تنظیمات، دستگاه و شبکه وابسته است. "
+        "از هشتگ عمومی نامرتبط و تکرار متن‌های نمونه خودداری کن. "
         "اگر فرمت carousel است، 6 تا 8 اسلاید کامل بده. اگر reel است، سناریوی زمان‌بندی‌شده بده. "
         "خروجی فقط JSON معتبر باشد با کلیدهای: content_goal, content_type, topic, title, hook, scenario, slides, caption, cta, hashtags, first_comment, cover, publish_plan, measurement, evidence, limitations."
     )
