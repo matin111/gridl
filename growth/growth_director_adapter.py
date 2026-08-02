@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any, Mapping, MutableMapping
 
 from growth.growth_director import build_growth_director
+from growth.next_content_engine import build_next_content
 
 
 def build_growth_director_payload(
@@ -12,13 +13,20 @@ def build_growth_director_payload(
     content_audit: Mapping[str, Any] | None,
     post_intelligence: Mapping[str, Any] | None,
     ai_growth_coach: Mapping[str, Any] | None,
+    analytics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return build_growth_director(
+    result = build_growth_director(
         profile_audit=profile_audit,
         content_audit=content_audit,
         post_intelligence=post_intelligence,
         ai_growth_coach=ai_growth_coach,
     )
+    result["next_content"] = build_next_content(
+        post_intelligence=post_intelligence,
+        daily_mission=result.get("daily_mission"),
+        analytics=analytics,
+    )
+    return result
 
 
 def attach_growth_director(response: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
@@ -27,6 +35,7 @@ def attach_growth_director(response: MutableMapping[str, Any]) -> MutableMapping
         content_audit=response.get("content_audit"),
         post_intelligence=response.get("post_intelligence"),
         ai_growth_coach=response.get("ai_growth_coach"),
+        analytics=response.get("analytics"),
     )
     return response
 
