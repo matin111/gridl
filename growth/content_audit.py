@@ -18,7 +18,8 @@ _WARNING_RE = re.compile(
     re.IGNORECASE,
 )
 _CONTRAST_RE = re.compile(
-    r"(?:اما|ولی|درحالی|برخلاف|واقعیت|فکر می.?کنی|vs|versus)",
+    r"(?:(?<![\w\u0600-\u06FF])(?:اما|ولی|درحالی|برخلاف|واقعیت|vs|versus)"
+    r"(?![\w\u0600-\u06FF])|فکر می.?کنی)",
     re.IGNORECASE,
 )
 _RESULT_RE = re.compile(
@@ -264,7 +265,8 @@ def audit_post(item: object | Mapping[str, Any]) -> dict[str, Any]:
 
 def _correlation_signal(posts: list[dict[str, Any]], field: str) -> dict[str, Any] | None:
     strong = [post for post in posts if int(post[field]) >= 70]
-    weak = [post for post in posts if int(post[field]) < 50]
+    # A score of exactly 50 is still borderline/weak for comparison.
+    weak = [post for post in posts if int(post[field]) <= 50]
     if len(strong) < 2 or len(weak) < 2:
         return None
     strong_perf = median(float(post["performance_score"]) for post in strong)
@@ -311,7 +313,11 @@ def audit_content(media: Iterable[object | Mapping[str, Any]]) -> dict[str, Any]
         + averages["cta_coverage"] * 0.15
     )
 
-    patterns = [signal for field in ("hook_score", "caption_score", "hashtag_score") if (signal := _correlation_signal(posts, field))]
+    patterns: list[dict[str, Any]] = []
+    for field in ("hook_score", "caption_score", "hashtag_score"):
+        signal = _correlation_signal(posts, field)
+        if signal is not None:
+            patterns.append(signal)
 
     issue_counts: dict[str, int] = {}
     for post in posts:
