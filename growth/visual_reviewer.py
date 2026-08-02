@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
+_FACE_TERMS = ("چهره", "انسانی", "صورت")
+
+
 def _score_label(score: int | None) -> str:
     if score is None:
         return "نامشخص"
@@ -28,13 +31,14 @@ def _safe_list(value: Any, limit: int = 5) -> list[str]:
     return result
 
 
-def build_visual_review(visual: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Convert raw Vision scores into a user-facing, evidence-grounded review.
+def _remove_generic_face_advice(items: list[str], face_detected: Any) -> list[str]:
+    """Absence of a face is neutral unless page-level evidence proves otherwise."""
+    if face_detected is not False:
+        return items
+    return [item for item in items if not any(term in item for term in _FACE_TERMS)]
 
-    The function never invents visual claims. It only explains fields that are
-    present in the visual payload and preserves the original Vision strengths,
-    weaknesses and recommendations.
-    """
+
+def build_visual_review(visual: Mapping[str, Any] | None) -> dict[str, Any]:
     if not visual:
         return {
             "status": "unavailable",
@@ -84,8 +88,8 @@ def build_visual_review(visual: Mapping[str, Any] | None) -> dict[str, Any]:
         evidence.append({"metric": "ocr_text", "value": ocr_text[:300], "source": "openai_vision"})
 
     strengths = _safe_list(visual.get("strengths"))
-    improvements = _safe_list(visual.get("weaknesses"))
-    actions = _safe_list(visual.get("recommendations"))
+    improvements = _remove_generic_face_advice(_safe_list(visual.get("weaknesses")), face)
+    actions = _remove_generic_face_advice(_safe_list(visual.get("recommendations")), face)
 
     if not strengths:
         if isinstance(readability, (int, float)) and readability >= 75:
@@ -118,10 +122,9 @@ def build_visual_review(visual: Mapping[str, Any] | None) -> dict[str, Any]:
         summary_parts.append(f"کیفیت کلی کاور {_score_label(int(cover))} است")
     if isinstance(scroll, (int, float)):
         summary_parts.append(f"قدرت توقف اسکرول {_score_label(int(scroll))} ارزیابی شد")
+    # Face presence is retained in evidence but is not presented as good or bad.
     if face is True:
-        summary_parts.append("چهره انسانی در تصویر دیده می‌شود")
-    elif face is False:
-        summary_parts.append("چهره انسانی در تصویر دیده نمی‌شود")
+        summary_parts.append("عنصر انسانی در تصویر دیده می‌شود")
 
     return {
         "status": "ready",
