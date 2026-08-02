@@ -16,6 +16,7 @@ from growth.profile_audit_adapter import build_profile_audit_payload
 from growth.content_audit_adapter import build_content_audit_payload
 from growth.growth_coach_adapter import build_growth_coach_payload
 from growth.post_intelligence_adapter import build_post_intelligence_payload
+from growth.growth_director_adapter import build_growth_director_payload
 from growth.visual_intelligence import enrich_post_intelligence_with_vision
 
 from typing import Any
@@ -234,7 +235,10 @@ class InstagramAnalyzeResponse(BaseModel):
     # V11 factual per-post dossiers; visual fields remain pending until Vision runs.
     post_intelligence: dict[str, Any] | None = None
 
-    audit_version: int = 11
+    # V12 central decision layer for dashboard, mission and priorities.
+    growth_director: dict[str, Any] | None = None
+
+    audit_version: int = 12
     source: str
     analyzed_at: str | None = None
     message: str | None = None
@@ -1966,7 +1970,15 @@ async def analyze_instagram_profile(
         if not fresh_cache.get("post_intelligence"):
             fresh_cache = dict(fresh_cache)
             fresh_cache["post_intelligence"] = build_post_intelligence_payload(cached_media)
-        fresh_cache["audit_version"] = 11
+        if not fresh_cache.get("growth_director"):
+            fresh_cache = dict(fresh_cache)
+            fresh_cache["growth_director"] = build_growth_director_payload(
+                profile_audit=fresh_cache.get("profile_audit"),
+                content_audit=fresh_cache.get("content_audit"),
+                post_intelligence=fresh_cache.get("post_intelligence"),
+                ai_growth_coach=fresh_cache.get("ai_growth_coach"),
+            )
+        fresh_cache["audit_version"] = 12
         return InstagramAnalyzeResponse(**fresh_cache)
 
     try:
@@ -2140,6 +2152,12 @@ async def analyze_instagram_profile(
         )
         post_intelligence = build_post_intelligence_payload(recent_media)
         post_intelligence = await enrich_post_intelligence_with_vision(post_intelligence)
+        growth_director = build_growth_director_payload(
+            profile_audit=profile_audit,
+            content_audit=content_audit,
+            post_intelligence=post_intelligence,
+            ai_growth_coach=ai_growth_coach,
+        )
 
         result = InstagramAnalyzeResponse(
             success=True,
@@ -2160,8 +2178,9 @@ async def analyze_instagram_profile(
             content_audit=content_audit,
             ai_growth_coach=ai_growth_coach,
             post_intelligence=post_intelligence,
-            audit_version=11,
-            source="boxapi_public_analysis_v11",
+            growth_director=growth_director,
+            audit_version=12,
+            source="boxapi_public_analysis_v12",
             analyzed_at=datetime.now(
                 timezone.utc
             ).isoformat(),
@@ -2202,7 +2221,14 @@ async def analyze_instagram_profile(
             stale_cache["audit_version"] = 10
             if not stale_cache.get("post_intelligence"):
                 stale_cache["post_intelligence"] = build_post_intelligence_payload(cached_media)
-            stale_cache["audit_version"] = 11
+            if not stale_cache.get("growth_director"):
+                stale_cache["growth_director"] = build_growth_director_payload(
+                    profile_audit=stale_cache.get("profile_audit"),
+                    content_audit=stale_cache.get("content_audit"),
+                    post_intelligence=stale_cache.get("post_intelligence"),
+                    ai_growth_coach=stale_cache.get("ai_growth_coach"),
+                )
+            stale_cache["audit_version"] = 12
             return InstagramAnalyzeResponse(**stale_cache)
 
         raise
@@ -2234,7 +2260,8 @@ async def analyze_instagram_profile(
             content_audit=None,
             ai_growth_coach=None,
             post_intelligence=None,
-            audit_version=11,
+            growth_director=None,
+            audit_version=12,
             source="error",
             analyzed_at=None,
             message=str(error),
