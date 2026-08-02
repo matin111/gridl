@@ -15,6 +15,7 @@ from growth.evidence_engine import build_evidence_findings
 from growth.profile_audit_adapter import build_profile_audit_payload
 from growth.content_audit_adapter import build_content_audit_payload
 from growth.growth_coach_adapter import build_growth_coach_payload
+from growth.post_intelligence_adapter import build_post_intelligence_payload
 
 from typing import Any
 
@@ -229,7 +230,10 @@ class InstagramAnalyzeResponse(BaseModel):
     # V10 decision layer: one action today plus the next priorities.
     ai_growth_coach: dict[str, Any] | None = None
 
-    audit_version: int = 10
+    # V11 factual per-post dossiers; visual fields remain pending until Vision runs.
+    post_intelligence: dict[str, Any] | None = None
+
+    audit_version: int = 11
     source: str
     analyzed_at: str | None = None
     message: str | None = None
@@ -1958,6 +1962,10 @@ async def analyze_instagram_profile(
                     content_audit=fresh_cache.get("content_audit"),
                 )
             fresh_cache["audit_version"] = 10
+        if not fresh_cache.get("post_intelligence"):
+            fresh_cache = dict(fresh_cache)
+            fresh_cache["post_intelligence"] = build_post_intelligence_payload(cached_media)
+        fresh_cache["audit_version"] = 11
         return InstagramAnalyzeResponse(**fresh_cache)
 
     try:
@@ -2129,6 +2137,7 @@ async def analyze_instagram_profile(
             profile_audit=profile_audit,
             content_audit=content_audit,
         )
+        post_intelligence = build_post_intelligence_payload(recent_media)
 
         result = InstagramAnalyzeResponse(
             success=True,
@@ -2148,8 +2157,9 @@ async def analyze_instagram_profile(
             profile_audit=profile_audit,
             content_audit=content_audit,
             ai_growth_coach=ai_growth_coach,
-            audit_version=10,
-            source="boxapi_public_analysis_v10",
+            post_intelligence=post_intelligence,
+            audit_version=11,
+            source="boxapi_public_analysis_v11",
             analyzed_at=datetime.now(
                 timezone.utc
             ).isoformat(),
@@ -2188,6 +2198,9 @@ async def analyze_instagram_profile(
                     content_audit=stale_cache.get("content_audit"),
                 )
             stale_cache["audit_version"] = 10
+            if not stale_cache.get("post_intelligence"):
+                stale_cache["post_intelligence"] = build_post_intelligence_payload(cached_media)
+            stale_cache["audit_version"] = 11
             return InstagramAnalyzeResponse(**stale_cache)
 
         raise
@@ -2218,7 +2231,8 @@ async def analyze_instagram_profile(
             profile_audit=None,
             content_audit=None,
             ai_growth_coach=None,
-            audit_version=10,
+            post_intelligence=None,
+            audit_version=11,
             source="error",
             analyzed_at=None,
             message=str(error),
