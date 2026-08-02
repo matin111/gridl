@@ -98,10 +98,12 @@ def _content_category(problem: str) -> str:
         return "cta"
     if "هوک" in problem or "شروع کپشن" in problem:
         return "hook"
-    if "کپشن" in problem:
-        return "caption"
+    # Hashtag messages often contain the word "caption" as context, so this
+    # check must run before the generic caption category.
     if "هشتگ" in problem:
         return "hashtag"
+    if "کپشن" in problem:
+        return "caption"
     return "general"
 
 
