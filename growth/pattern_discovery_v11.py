@@ -4,6 +4,9 @@ from collections import defaultdict
 from statistics import mean
 from typing import Any, Mapping
 
+MIN_VISUAL_POSTS = 6
+MIN_GROUP_SIZE = 3
+
 
 def _performance_value(post: Mapping[str, Any]) -> float:
     performance = post.get("performance") or {}
@@ -33,7 +36,7 @@ def _group_comparison(
     feature: str,
     yes_label: str,
     no_label: str,
-    minimum_per_group: int = 2,
+    minimum_per_group: int = MIN_GROUP_SIZE,
 ) -> dict[str, Any] | None:
     groups: dict[bool, list[float]] = defaultdict(list)
     post_ids: dict[bool, list[str]] = defaultdict(list)
@@ -52,10 +55,10 @@ def _group_comparison(
     no_average = mean(groups[False])
     baseline = max(min(yes_average, no_average), 0.01)
     difference_percent = round(abs(yes_average - no_average) / baseline * 100)
-    if difference_percent < 15:
+    if difference_percent < 20:
         return None
 
-    better = True if yes_average > no_average else False
+    better = yes_average > no_average
     return {
         "key": f"visual:{feature}",
         "type": "binary_visual_pattern",
@@ -72,7 +75,7 @@ def _group_comparison(
         "sample_size": len(groups[True]) + len(groups[False]),
         "group_sizes": {"yes": len(groups[True]), "no": len(groups[False])},
         "evidence_post_ids": post_ids[better],
-        "confidence": "medium" if min(len(groups[True]), len(groups[False])) < 4 else "high",
+        "confidence": "high" if min(len(groups[True]), len(groups[False])) >= 5 else "medium",
         "limitation": "این رابطه همبستگی در پست‌های بررسی‌شده است و علت قطعی عملکرد را ثابت نمی‌کند.",
     }
 
@@ -82,7 +85,7 @@ def _score_correlation_pattern(
     *,
     metric: str,
     title: str,
-    minimum_group: int = 2,
+    minimum_group: int = MIN_GROUP_SIZE,
 ) -> dict[str, Any] | None:
     rows: list[tuple[float, float, str]] = []
     for post in posts:
@@ -106,10 +109,15 @@ def _score_correlation_pattern(
     baseline = max(min(low_performance, high_performance), 0.01)
     difference_percent = round(abs(high_performance - low_performance) / baseline * 100)
     metric_gap = mean(row[0] for row in high) - mean(row[0] for row in low)
-    if difference_percent < 15 or metric_gap < 8:
+    if difference_percent < 20 or metric_gap < 10:
         return None
 
     higher_is_better = high_performance > low_performance
+    # Negative relationships are much easier to produce by chance. Do not expose
+    # them from a tiny sample as an actionable page pattern.
+    if not higher_is_better and (len(rows) < 8 or difference_percent < 30):
+        return None
+
     return {
         "key": f"visual:{metric}",
         "type": "visual_score_pattern",
@@ -127,15 +135,28 @@ def _score_correlation_pattern(
         "difference_percent": difference_percent,
         "sample_size": len(rows),
         "evidence_post_ids": [row[2] for row in (high if higher_is_better else low)],
-        "confidence": "medium" if len(rows) < 8 else "high",
+        "confidence": "high" if len(rows) >= 10 else "medium",
         "limitation": "این الگو از مقایسه داخلی همین پیج به دست آمده و تضمین‌کننده عملکرد آینده نیست.",
     }
 
 
 def discover_visual_patterns(post_intelligence: Mapping[str, Any] | None) -> dict[str, Any]:
     posts = _completed_posts(post_intelligence)
-    patterns: list[dict[str, Any]] = []
+    if len(posts) < MIN_VISUAL_POSTS:
+        return {
+            "version": 11,
+            "status": "insufficient_evidence",
+            "analyzed_visual_posts": len(posts),
+            "minimum_required_posts": MIN_VISUAL_POSTS,
+            "patterns": [],
+            "limitations": [
+                f"برای کشف الگوی تصویری حداقل {MIN_VISUAL_POSTS} پست تحلیل‌شده لازم است.",
+                "الگوها همبستگی هستند و رابطه علت و معلولی را اثبات نمی‌کنند.",
+                "Reach، Saves، Shares و Retention فقط در صورت دسترسی به Insights قابل بررسی‌اند.",
+            ],
+        }
 
+    patterns: list[dict[str, Any]] = []
     face_pattern = _group_comparison(
         posts,
         feature="face_detected",
@@ -170,9 +191,10 @@ def discover_visual_patterns(post_intelligence: Mapping[str, Any] | None) -> dic
         "version": 11,
         "status": "ready" if patterns else "insufficient_evidence",
         "analyzed_visual_posts": len(posts),
+        "minimum_required_posts": MIN_VISUAL_POSTS,
         "patterns": patterns[:5],
         "limitations": [
-            "حداقل دو نمونه در هر گروه برای مقایسه لازم است.",
+            f"حداقل {MIN_GROUP_SIZE} نمونه در هر گروه برای مقایسه لازم است.",
             "الگوها همبستگی هستند و رابطه علت و معلولی را اثبات نمی‌کنند.",
             "Reach، Saves، Shares و Retention فقط در صورت دسترسی به Insights قابل بررسی‌اند.",
         ],
