@@ -38,6 +38,7 @@ def test_pattern_discovery_finds_cover_score_relationship():
     pattern = next(item for item in result["patterns"] if item["key"] == "visual:cover_score")
     assert pattern["direction"] == "positive"
     assert pattern["sample_size"] == 6
+    assert 0 <= pattern["difference_percent"] <= 100
     assert set(pattern["evidence_post_ids"]) == {"h1", "h2", "h3"}
     assert "تضمین" in pattern["limitation"]
 
@@ -58,7 +59,24 @@ def test_pattern_discovery_compares_face_groups_without_causal_claim():
     assert pattern["better_group"] == "yes"
     assert pattern["group_sizes"] == {"yes": 3, "no": 3}
     assert pattern["sample_size"] == 6
+    assert 0 <= pattern["difference_percent"] <= 100
     assert "همبستگی" in pattern["limitation"]
+
+
+def test_negative_visual_score_relationship_is_not_shown_as_winning_pattern():
+    payload = {
+        "posts": [
+            post("high1", 5, cover_score=92, contrast_score=90),
+            post("high2", 6, cover_score=88, contrast_score=86),
+            post("high3", 7, cover_score=84, contrast_score=82),
+            post("low1", 90, cover_score=46, contrast_score=44),
+            post("low2", 80, cover_score=42, contrast_score=40),
+            post("low3", 70, cover_score=38, contrast_score=36),
+        ]
+    }
+    result = discover_visual_patterns(payload)
+    assert result["status"] == "insufficient_evidence"
+    assert result["patterns"] == []
 
 
 def test_pending_visual_posts_are_ignored():
