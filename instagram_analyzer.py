@@ -16,6 +16,7 @@ from growth.profile_audit_adapter import build_profile_audit_payload
 from growth.content_audit_adapter import build_content_audit_payload
 from growth.growth_coach_adapter import build_growth_coach_payload
 from growth.post_intelligence_adapter import build_post_intelligence_payload
+from growth.visual_intelligence import enrich_post_intelligence_with_vision
 
 from typing import Any
 
@@ -2138,6 +2139,7 @@ async def analyze_instagram_profile(
             content_audit=content_audit,
         )
         post_intelligence = build_post_intelligence_payload(recent_media)
+        post_intelligence = await enrich_post_intelligence_with_vision(post_intelligence)
 
         result = InstagramAnalyzeResponse(
             success=True,
