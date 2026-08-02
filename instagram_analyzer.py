@@ -1977,6 +1977,7 @@ async def analyze_instagram_profile(
                 content_audit=fresh_cache.get("content_audit"),
                 post_intelligence=fresh_cache.get("post_intelligence"),
                 ai_growth_coach=fresh_cache.get("ai_growth_coach"),
+                analytics=fresh_cache.get("analytics"),
             )
         fresh_cache["audit_version"] = 12
         return InstagramAnalyzeResponse(**fresh_cache)
@@ -2157,6 +2158,7 @@ async def analyze_instagram_profile(
             content_audit=content_audit,
             post_intelligence=post_intelligence,
             ai_growth_coach=ai_growth_coach,
+            analytics=analytics.model_dump(mode="json"),
         )
 
         result = InstagramAnalyzeResponse(
@@ -2227,6 +2229,7 @@ async def analyze_instagram_profile(
                     content_audit=stale_cache.get("content_audit"),
                     post_intelligence=stale_cache.get("post_intelligence"),
                     ai_growth_coach=stale_cache.get("ai_growth_coach"),
+                    analytics=stale_cache.get("analytics"),
                 )
             stale_cache["audit_version"] = 12
             return InstagramAnalyzeResponse(**stale_cache)
